@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+*.py[cod]
+
+ggb_interactive_*.html
+pic/
