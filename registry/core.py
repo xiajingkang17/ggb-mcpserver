@@ -1,33 +1,26 @@
 """
 GeoGebra 绘图工具注册表。
-本模块职责：
-1. 统一维护 draw_type -> category / handler / schema 的映射关系。
-2. 对外提供工具枚举、3D 判断、统一绘图分发、MCP 输入 schema 构建能力。
-3. 让主文件与 server 层不再依赖分散的工具列表和手写 if/elif 分发。
 
-说明：
-当前 registry 已经进入“精确注册”阶段：
-- 每个 draw_type 都直接绑定到 shapes 层的精确 handler。
-- 工具清单、类别信息、handler 映射都在本模块内统一编排。
-- 构建默认注册表时，会校验工具目录、类别映射、handler 映射三者是否一致。
+本模块职责：
+1. 统一维护标准 type -> category / handler 的映射关系。
+2. 对外提供工具枚举、3D 判断和统一绘图分发能力。
+3. 为 MCP 输入 schema 提供标准工具清单。
 """
 
 from __future__ import annotations
 
 from typing import Any, Iterable
 
-from tool_catalog import ALL_TOOLS, FUNCTION_TOOLS, TOOLS_2D, TOOLS_3D
+from drawing_tools.tool_catalog import ALL_TOOLS, FUNCTION_TOOLS, TOOLS_2D, TOOLS_3D
 
 from .models import ToolCategory, ToolSpec
+from .schemas.common import id_schema, single_draw_conditional, step_schema
+from .schemas import build_standard_params_schema_map
 
 
 # ========== 核心注册表 ==========
 class ToolRegistry:
-    """绘图工具注册表。
-
-    这个对象是 registry 层的统一入口。
-    所有关于绘图工具的查询和分发，都应该通过这里完成。
-    """
+    """统一管理绘图工具元数据与运行时分发。"""
 
     def __init__(self, specs: Iterable[ToolSpec] | None = None):
         self._specs: dict[str, ToolSpec] = {}
@@ -77,20 +70,9 @@ class ToolRegistry:
         page,
         skip_coord_init: bool = False,
     ):
-        """根据注册信息统一执行绘图分发。
-
-        Args:
-            draw_type: 图形类型
-            params: 图形参数
-            page: Playwright 页面对象
-            skip_coord_init: 连续绘制时是否跳过坐标系初始化
-
-        Returns:
-            透传底层绘图函数返回值
-        """
+        """根据注册信息统一执行绘图分发。"""
         spec = self.get(draw_type)
 
-        # 目前只有 2D 绘图入口额外支持 skip_coord_init。
         if spec.category == "2d":
             return spec.handler(
                 page,
@@ -102,45 +84,43 @@ class ToolRegistry:
         return spec.handler(page, draw_type, params)
 
     def build_export_input_schema(self) -> dict[str, Any]:
-        """构建 export_interactive_html 的统一输入 schema。
+        """构建 export_interactive_html 的统一输入 schema。"""
+        tool_specs = self.list_tool_specs()
+        tool_names = [spec.name for spec in tool_specs]
 
-        这里由 registry 统一提供工具枚举和步骤结构，
-        避免 server 层继续手工维护 draw_type 的枚举列表。
-        """
-        tool_names = self.list_tool_names()
+        step_variants = [
+            step_schema(spec.name, spec.params_schema)
+            for spec in tool_specs
+        ]
+
+        draw_type_conditionals = [
+            single_draw_conditional(spec.name, spec.params_schema)
+            for spec in tool_specs
+        ]
 
         return {
             "type": "object",
+            "additionalProperties": False,
             "properties": {
                 "draw_type": {
                     "type": "string",
                     "description": "单个图形类型（与 steps 二选一）",
                     "enum": tool_names,
                 },
+                "id": id_schema("单个图形模式下创建对象的唯一标识"),
                 "params": {
                     "type": "object",
-                    "description": "单个图形参数（与 steps 二选一）",
+                    "description": "单个图形参数；其精确结构由 draw_type 决定",
                 },
                 "steps": {
                     "type": "array",
+                    "minItems": 1,
                     "description": (
                         "连续绘制步骤列表（与 draw_type/params 二选一），"
-                        "格式：[{type:'point_3d', params:{...}}]"
+                        "格式：[{type:'point', id:'A', params:{...}}]"
                     ),
                     "items": {
-                        "type": "object",
-                        "properties": {
-                            "type": {
-                                "type": "string",
-                                "description": "图形类型",
-                                "enum": tool_names,
-                            },
-                            "params": {
-                                "type": "object",
-                                "description": "图形参数",
-                            },
-                        },
-                        "required": ["type", "params"],
+                        "oneOf": step_variants,
                     },
                 },
                 "mode": {
@@ -154,17 +134,17 @@ class ToolRegistry:
                     "description": "保存目录路径（强烈推荐提供）",
                 },
             },
+            "oneOf": [
+                {"required": ["draw_type", "id", "params"]},
+                {"required": ["steps"]},
+            ],
+            "allOf": draw_type_conditionals,
         }
 
 
 # ========== 默认元数据构建 ==========
 def _build_default_category_map() -> dict[str, ToolCategory]:
-    """构建默认工具类别映射。
-
-    说明：
-    1. 工具归类本身属于 registry 的元数据职责。
-    2. 这里基于 tool_catalog 统一生成，避免类别信息散落在注册代码中重复维护。
-    """
+    """构建默认工具类别映射。"""
     category_map: dict[str, ToolCategory] = {}
 
     for tool_name in FUNCTION_TOOLS:
@@ -178,112 +158,61 @@ def _build_default_category_map() -> dict[str, ToolCategory]:
 
 
 def _build_default_handler_map() -> dict[str, Any]:
-    """构建默认工具 handler 映射。
-
-    说明：
-    1. 这里集中维护 draw_type -> handler 的绑定关系。
-    2. 后续新增图形时，只需要补这一份映射，不需要再手写一长串 ToolSpec。
-    """
-    from shapes.functions import (
-        handle_cubic_standard,
-        handle_cubic_standard_slider,
-        handle_cos_function,
-        handle_cos_function_slider,
-        handle_exponential_function,
-        handle_exponential_function_slider,
-        handle_linear_general,
-        handle_linear_general_slider,
-        handle_logarithmic_function,
-        handle_logarithmic_function_slider,
-        handle_polynomial_function,
-        handle_quadratic_standard,
-        handle_quadratic_standard_slider,
-        handle_sin_function,
-        handle_sin_function_slider,
-        handle_tan_function,
-        handle_tan_function_slider,
-    )
+    """构建默认工具 handler 映射。"""
+    from shapes.functions import handle_function
     from shapes.geometry_2d import (
         handle_angle_bisector,
-        handle_circle_center_radius,
-        handle_ellipse_equation,
-        handle_hyperbola_equation,
-        handle_intersect_2d,
+        handle_arc,
+        handle_circle,
+        handle_ellipse,
+        handle_hyperbola,
+        handle_intersection,
         handle_line,
-        handle_parabola_equation,
+        handle_parabola,
         handle_perpendicular_line,
-        handle_point_2d,
-        handle_point_on_object,
-        handle_polygon_points,
+        handle_point,
+        handle_point_on,
         handle_segment,
         handle_tangent,
-        handle_triangle_points,
     )
     from shapes.geometry_3d import (
-        handle_cone_radius_height,
-        handle_cylinder_radius_height,
+        handle_cone,
+        handle_cylinder,
         handle_point_3d,
-        handle_point_on_segment_3d,
-        handle_polygon_3d,
-        handle_prism_all_vertices,
-        handle_pyramid_all_vertices,
+        handle_point_on_3d,
         handle_segment_3d,
-        handle_sphere_center_radius,
+        handle_sphere,
     )
 
     return {
-        "linear_general": handle_linear_general,
-        "linear_general_slider": handle_linear_general_slider,
-        "quadratic_standard": handle_quadratic_standard,
-        "quadratic_standard_slider": handle_quadratic_standard_slider,
-        "cubic_standard": handle_cubic_standard,
-        "cubic_standard_slider": handle_cubic_standard_slider,
-        "polynomial_function": handle_polynomial_function,
-        "sin_function": handle_sin_function,
-        "sin_function_slider": handle_sin_function_slider,
-        "cos_function": handle_cos_function,
-        "cos_function_slider": handle_cos_function_slider,
-        "tan_function": handle_tan_function,
-        "tan_function_slider": handle_tan_function_slider,
-        "exponential_function": handle_exponential_function,
-        "exponential_function_slider": handle_exponential_function_slider,
-        "logarithmic_function": handle_logarithmic_function,
-        "logarithmic_function_slider": handle_logarithmic_function_slider,
-        "point_2d": handle_point_2d,
-        "point_on_object": handle_point_on_object,
+        "function": handle_function,
+        "point": handle_point,
         "segment": handle_segment,
         "line": handle_line,
-        "circle_center_radius": handle_circle_center_radius,
-        "triangle_points": handle_triangle_points,
-        "polygon_points": handle_polygon_points,
-        "ellipse_equation": handle_ellipse_equation,
-        "parabola_equation": handle_parabola_equation,
-        "hyperbola_equation": handle_hyperbola_equation,
-        "intersect_2d": handle_intersect_2d,
-        "tangent": handle_tangent,
-        "angle_bisector": handle_angle_bisector,
+        "circle": handle_circle,
+        "ellipse": handle_ellipse,
+        "parabola": handle_parabola,
+        "hyperbola": handle_hyperbola,
+        "arc": handle_arc,
+        "point_on": handle_point_on,
+        "intersection": handle_intersection,
         "perpendicular_line": handle_perpendicular_line,
+        "angle_bisector": handle_angle_bisector,
+        "tangent": handle_tangent,
         "point_3d": handle_point_3d,
         "segment_3d": handle_segment_3d,
-        "point_on_segment_3d": handle_point_on_segment_3d,
-        "polygon_3d": handle_polygon_3d,
-        "sphere_center_radius": handle_sphere_center_radius,
-        "cylinder_radius_height": handle_cylinder_radius_height,
-        "cone_radius_height": handle_cone_radius_height,
-        "pyramid_all_vertices": handle_pyramid_all_vertices,
-        "prism_all_vertices": handle_prism_all_vertices,
+        "point_on_3d": handle_point_on_3d,
+        "sphere": handle_sphere,
+        "cylinder": handle_cylinder,
+        "cone": handle_cone,
     }
 
 
 def _build_default_specs() -> list[ToolSpec]:
-    """批量构建默认 ToolSpec 列表。
-
-    说明：
-    1. 这里用 `ALL_TOOLS` 保证注册顺序稳定。
-    2. 这里同时校验目录清单、类别映射、handler 映射三者是否一致。
-    """
+    """批量构建默认 ToolSpec 列表。"""
     category_map = _build_default_category_map()
     handler_map = _build_default_handler_map()
+    params_schema_map = build_standard_params_schema_map()
 
     missing_categories = [name for name in ALL_TOOLS if name not in category_map]
     missing_handlers = [name for name in ALL_TOOLS if name not in handler_map]
@@ -301,6 +230,7 @@ def _build_default_specs() -> list[ToolSpec]:
             name=tool_name,
             category=category_map[tool_name],
             handler=handler_map[tool_name],
+            params_schema=params_schema_map.get(tool_name, {"type": "object", "description": "图形参数"}),
         )
         for tool_name in ALL_TOOLS
     ]
@@ -308,19 +238,11 @@ def _build_default_specs() -> list[ToolSpec]:
 
 # ========== 默认注册表构建 ==========
 def create_default_registry() -> ToolRegistry:
-    """基于当前仓库已有绘图实现构建默认注册表。
-
-    当前阶段 registry 已经完成 shapes 层全量接管：
-    1. 每个 draw_type 都绑定到精确的 shapes handler。
-    2. 注册顺序、工具目录、类别信息统一由 registry 内部维护。
-    3. 构建完成后，会校验工具目录与 handler 映射是否完整一致。
-    """
+    """基于当前仓库已有绘图实现构建默认注册表。"""
     registry = ToolRegistry(_build_default_specs())
 
     expected_tools = list(ALL_TOOLS)
     actual_tools = registry.list_tool_names()
-
-    # 这里继续保留最终一致性校验，避免后续修改时无意打乱注册顺序或遗漏工具。
     if actual_tools != expected_tools:
         raise ValueError(
             f"registry 工具顺序或清单不一致：expected={expected_tools}, actual={actual_tools}"

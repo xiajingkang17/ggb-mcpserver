@@ -55,6 +55,7 @@ class ExportHtmlRequest:
 
     Args:
         draw_type: 单个图形类型
+        id: 单个图形创建对象的唯一标识
         params: 单个图形参数
         steps: 连续绘制步骤列表
         mode: 导出模式，支持 auto / 2d / 3d
@@ -62,6 +63,7 @@ class ExportHtmlRequest:
     """
 
     draw_type: str | None = None
+    id: str | None = None
     params: dict[str, Any] | None = None
     steps: list[dict[str, Any]] | None = None
     mode: str = "auto"

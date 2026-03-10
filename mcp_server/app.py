@@ -10,9 +10,14 @@ MCP Server 创建与注册。
 from typing import Sequence
 
 from mcp.server import Server
-from mcp.types import ImageContent, Prompt, TextContent, Tool
+from mcp.types import ImageContent, Prompt, Resource, ResourceTemplate, TextContent, Tool
 
 from .prompts import PromptRegistry, build_prompt_definitions, handle_prompt_get
+from .resources import (
+    build_resource_definitions,
+    build_resource_template_definitions,
+    read_resource_content,
+)
 from .tools import (
     ClearCanvas,
     ExportHtmlSync,
@@ -49,6 +54,21 @@ def create_server(
     async def list_tools() -> list[Tool]:
         """列出可用的 MCP tools。"""
         return build_tool_definitions(tool_registry)
+
+    @server.list_resources()
+    async def list_resources() -> list[Resource]:
+        """列出可用的 MCP resources。"""
+        return build_resource_definitions(tool_registry)
+
+    @server.read_resource()
+    async def read_resource(uri) -> Sequence[object]:
+        """读取指定 resource 内容。"""
+        return read_resource_content(str(uri), tool_registry=tool_registry)
+
+    @server.list_resource_templates()
+    async def list_resource_templates() -> list[ResourceTemplate]:
+        """列出可用的 MCP resource templates。"""
+        return build_resource_template_definitions()
 
     @server.call_tool()
     async def call_tool(

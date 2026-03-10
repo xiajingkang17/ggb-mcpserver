@@ -1,0 +1,94 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<title>GeoGebra Interactive</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<script src="https://www.geogebra.org/apps/deployggb.js"></script>
+<style>
+  html,body,#applet_container{height:100%;margin:0}
+  .topbar{position:fixed;z-index:5;top:8px;right:calc(3 * 120px + 8px);background:#fff8;padding:6px 10px;border-radius:8px}
+  button{margin-right:8px}
+</style>
+</head>
+<body>
+<div class="topbar">
+  <button onclick="downloadGGB()">导出.GGB</button>
+  <button onclick="downloadPNG()">导出PNG</button>
+  <button onclick="resetView()">重置视图</button>
+</div>
+<div id="applet_container"></div>
+<script>
+  var params = {
+    appName: "geometry",
+    width: window.innerWidth, height: window.innerHeight,
+    showToolBar: true, showAlgebraInput: true, showMenuBar: false,
+    allowStyleBar: true, enableRightClick: true, enableShiftDragZoom: true,
+    useBrowserForJS: true, customToolBar: "0 1 2 | 3 4 5 | 10 11 | 15 45 46 | 70 72",
+    ggbBase64: "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"
+  };
+  var applet = new GGBApplet(params, true);
+  window.addEventListener("load", function() {
+    applet.inject('applet_container');
+    setTimeout(function(){
+      if ("geometry" === "geometry" && window.ggbApplet && ggbApplet.setAxesRatio) {
+        // 2D 下保持 1:1 比例，避免圆被压成椭圆。
+        ggbApplet.setAxesRatio(1,1);
+      }
+    }, 800);
+  });
+
+  function downloadGGB(){
+    var b64 = ggbApplet.getBase64();
+    var a = document.createElement('a');
+    a.href = "data:application/octet-stream;base64," + b64;
+    a.download = "construction.ggb";
+    a.click();
+  }
+  function downloadPNG(){
+    var p = ggbApplet.getPNGBase64(1, false, 96);
+    var a = document.createElement('a');
+    a.href = "data:image/png;base64," + p;
+    a.download = "screenshot.png";
+    a.click();
+  }
+  function resetView(){
+    try {
+      // 1. 清除所有对象
+      if (ggbApplet.evalCommand) {
+        ggbApplet.evalCommand('DeleteAll()');
+      }
+
+      // 2. 重置视图到标准位置
+      if (ggbApplet.setStandardView) {
+        ggbApplet.setStandardView();
+      }
+
+      // 3. 重置坐标系和显示设置
+      if (ggbApplet.evalCommand) {
+        ggbApplet.evalCommand('ShowAxes(true)');
+        ggbApplet.evalCommand('ShowGrid(true)');
+        if ("geometry" === "geometry") {
+          ggbApplet.evalCommand('SetCoordSystem(-10, 10, -10, 10)');
+          if (ggbApplet.setAxesRatio) {
+            ggbApplet.setAxesRatio(1, 1);
+          }
+        } else if ("geometry" === "3d") {
+          ggbApplet.evalCommand('SetCoordSystem(-5, 5, -5, 5, -5, 5)');
+        }
+        ggbApplet.evalCommand('ZoomToFit()');
+      }
+
+      // 4. 刷新视图
+      if (ggbApplet.repaintView) {
+        ggbApplet.repaintView();
+      }
+      if (ggbApplet.updateConstruction) {
+        ggbApplet.updateConstruction();
+      }
+    } catch(e) {
+      console.error('重置视图失败:', e);
+      alert('重置视图时出错: ' + e.message);
+    }
+  }
+  window.addEventListener('resize', ()=>location.reload());
+</script>
+</body></html>

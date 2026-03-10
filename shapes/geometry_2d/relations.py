@@ -1,25 +1,19 @@
 """
-2D 关系类图形 handler。
+2D 关系型图形 handlers。
 
 本模块职责：
 1. 处理依赖已有对象关系的 2D 图形。
-2. 保持旧实现中的命令顺序与默认参数策略不变。
-
-当前包含：
-- point_on_object
-- intersect_2d
-- tangent
-- angle_bisector
-- perpendicular_line
+2. 主入口统一采用标准参数格式。
+3. 延续原实现的 GeoGebra 命令逻辑，不改变作图结果。
 """
 
 from __future__ import annotations
 
-from .basic import _add_point_if_coordinates, _build_context
+from .basic import _add_point_if_coordinates, _build_context, _resolve_point_ref
 from shapes.common import execute_context, stderr_print
 
 
-# ========== 2D 关系类辅助逻辑 ==========
+# ========== 2D 关系型辅助逻辑 ==========
 def _add_slider(
     collector,
     slider_name: str,
@@ -35,11 +29,24 @@ def _add_slider(
     collector.add(f"SetLabelVisible[{slider_name}, true]")
 
 
-def _default_slider_config_for_object(object_name: str) -> tuple[float, float, float, float]:
-    """根据对象名称推断默认滑动条范围。
+def _require_step_id(params: dict, draw_type: str) -> str:
+    """获取当前标准步骤对应的对象名。"""
+    step_id = params.get("id")
+    if not isinstance(step_id, str) or not step_id.strip():
+        raise Exception(f"{draw_type} 需要提供明确的 id，不能依赖隐式命名")
+    return step_id.strip()
 
-    这里保留旧实现中的启发式规则，不额外引入新的对象类型判断。
-    """
+
+def _resolve_object_ref(object_ref) -> str:
+    """解析标准参数中的对象引用。"""
+    if isinstance(object_ref, str) and object_ref.strip():
+        return object_ref.strip()
+
+    raise Exception("对象引用必须是已存在对象的 id 字符串")
+
+
+def _default_slider_config_for_object(object_name: str) -> tuple[float, float, float, float]:
+    """根据对象名称推断默认滑动条范围。"""
     if "seg_" in object_name or "Segment" in object_name:
         return 0, 1, 0.01, 0.5
     if "circ_" in object_name or "Circle" in object_name:
@@ -50,70 +57,58 @@ def _default_slider_config_for_object(object_name: str) -> tuple[float, float, f
         return 0, 1, 0.01, 0
     if "hyperbola_" in object_name or "Hyperbola" in object_name:
         return 0, 1, 0.01, 0
+    if "arc_" in object_name or "Arc" in object_name:
+        return 0, 1, 0.01, 0
     return 0, 1, 0.01, 0.5
 
 
-def _resolve_line_name(ctx, line_param) -> str:
-    """解析 perpendicular_line 所依赖的直线参数。"""
-    if isinstance(line_param, dict):
-        if "point1" in line_param and "point2" in line_param:
-            line_p1 = line_param["point1"]
-            line_p2 = line_param["point2"]
-            line_p1_name = line_p1.get("name", "A")
-            line_p2_name = line_p2.get("name", "B")
+def _resolve_line_name(line_param) -> str:
+    """解析垂线依赖的目标直线。"""
+    if isinstance(line_param, str) and line_param.strip():
+        return line_param.strip()
 
-            _add_point_if_coordinates(
-                ctx,
-                line_p1_name,
-                line_p1.get("coordinates", None),
-            )
-            _add_point_if_coordinates(
-                ctx,
-                line_p2_name,
-                line_p2.get("coordinates", None),
-            )
-
-            line_name = line_param.get("name", f"line_{line_p1_name}{line_p2_name}")
-            if "name" not in line_param:
-                ctx.collector.add(f"{line_name} = Line[{line_p1_name}, {line_p2_name}]")
-                ctx.collector.add(f"ShowLabel[{line_name}, false]")
-            return line_name
-
-        if "name" in line_param:
-            return line_param.get("name")
-
-        raise Exception("perpendicular_line需要提供line参数（包含point1和point2，或name）")
-
-    if isinstance(line_param, str):
-        return line_param
-
-    raise Exception("perpendicular_line需要提供line参数")
+    raise Exception("perpendicular_line.target 需要提供目标直线 id")
 
 
-# ========== 2D 关系类图形 ==========
-def handle_point_on_object(
+def _resolve_pick_index(params: dict, fallback: int = 1) -> int:
+    """解析标准参数中的多解选取方式。"""
+    pick = params.get("pick")
+    if pick is None:
+        return fallback
+
+    if not isinstance(pick, dict):
+        raise Exception("pick 必须是对象")
+
+    mode = pick.get("mode", "index")
+    if mode != "index":
+        raise Exception(f"当前仅支持 pick.mode=index，当前为 {mode}")
+
+    value = pick.get("value")
+    if value is None:
+        raise Exception("pick.mode=index 时必须提供 value")
+    return value
+
+
+# ========== 2D 关系型图形 ==========
+def handle_point_on(
     page,
     draw_type: str,
     params: dict,
     skip_coord_init: bool = False,
 ) -> None:
-    """在已有对象上创建 2D 点。"""
+    """在对象上创建标准格式的 2D 点。"""
     ctx = _build_context(page, skip_coord_init=skip_coord_init)
 
-    point_name = params.get("point_name", "P")
-    object_name = params.get("object", "circ_O")
-    parameter = params.get("parameter", None)
-    slider = params.get("slider", None)
+    point_name = _require_step_id(params, "point_on")
+    object_name = _resolve_object_ref(params.get("object"))
+    placement = params.get("placement")
 
-    if parameter is not None:
-        ctx.collector.add(f"{point_name} = Point[{object_name}, {parameter}]")
-    elif slider is not None:
-        slider_name = slider.get("name", f"t_{point_name}")
-        slider_min = slider.get("min", 0)
-        slider_max = slider.get("max", 1)
-        slider_step = slider.get("step", 0.01)
-        slider_init = slider.get("init", slider_min)
-
+    if placement is None:
+        # 默认通过滑动条控制点在对象上的位置，保留交互性。
+        slider_name = f"t_{point_name}"
+        slider_min, slider_max, slider_step, slider_init = _default_slider_config_for_object(
+            object_name
+        )
         _add_slider(
             ctx.collector,
             slider_name,
@@ -124,50 +119,61 @@ def handle_point_on_object(
         )
         ctx.collector.add(f"{point_name} = Point[{object_name}, {slider_name}]")
     else:
-        slider_name = f"t_{point_name}"
-        slider_min, slider_max, slider_step, slider_init = _default_slider_config_for_object(
-            object_name
-        )
+        if not isinstance(placement, dict):
+            raise Exception("placement 必须是对象")
 
-        _add_slider(
-            ctx.collector,
-            slider_name,
-            slider_min,
-            slider_max,
-            slider_step,
-            slider_init,
-        )
-        ctx.collector.add(f"{point_name} = Point[{object_name}, {slider_name}]")
+        placement_mode = placement.get("mode", "slider")
+        if placement_mode == "fixed":
+            value = placement.get("value")
+            if value is None:
+                raise Exception("placement.mode=fixed 时必须提供 value")
+            ctx.collector.add(f"{point_name} = Point[{object_name}, {value}]")
+        elif placement_mode == "slider":
+            slider_name = placement.get("name", f"t_{point_name}")
+            slider_min = placement.get("min", 0)
+            slider_max = placement.get("max", 1)
+            slider_step = placement.get("step", 0.01)
+            slider_init = placement.get("init", slider_min)
+            _add_slider(
+                ctx.collector,
+                slider_name,
+                slider_min,
+                slider_max,
+                slider_step,
+                slider_init,
+            )
+            ctx.collector.add(f"{point_name} = Point[{object_name}, {slider_name}]")
+        else:
+            raise Exception(f"当前仅支持 placement.mode=fixed/slider，当前为 {placement_mode}")
 
     ctx.collector.add(f"SetLabelStyle[{point_name}, 0]")
     ctx.collector.add(f"SetLabelVisible[{point_name}, true]")
 
     execute_context(ctx)
-    return None
 
 
-def handle_intersect_2d(
+def handle_intersection(
     page,
     draw_type: str,
     params: dict,
     skip_coord_init: bool = False,
 ) -> None:
-    """创建两个 2D 几何对象的交点。"""
+    """创建两个对象的标准交点。"""
     ctx = _build_context(page, skip_coord_init=skip_coord_init)
 
-    point_name = params.get("point_name", "P")
-    object1 = params.get("object1")
-    object2 = params.get("object2")
-    index = params.get("index", 1)
+    point_name = _require_step_id(params, "intersection")
+    objects = params.get("objects")
+    if not isinstance(objects, (list, tuple)) or len(objects) != 2:
+        raise Exception("intersection 需要提供 objects，且长度为 2")
 
-    if not object1 or not object2:
-        raise Exception("intersect_2d需要提供object1和object2参数")
+    object1 = _resolve_object_ref(objects[0])
+    object2 = _resolve_object_ref(objects[1])
+    index = _resolve_pick_index(params, fallback=1)
 
+    # 沿用原实现：交点始终交给 GeoGebra 精确计算，不手动推坐标。
     ctx.collector.add(f"{point_name} = Intersect[{object1}, {object2}, {index}]")
-    ctx.collector.add(f"ShowLabel[{point_name}, true]")
 
     execute_context(ctx)
-    return None
 
 
 def handle_tangent(
@@ -176,28 +182,25 @@ def handle_tangent(
     params: dict,
     skip_coord_init: bool = False,
 ) -> None:
-    """绘制点到曲线的切线。"""
+    """绘制标准格式的切线。"""
     ctx = _build_context(page, skip_coord_init=skip_coord_init)
 
-    point = params.get("point", {})
-    conic = params.get("conic", {})
-    index = params.get("index", None)
+    point_name, point_coordinates = _resolve_point_ref(params.get("through"))
+    target_name = _resolve_object_ref(params.get("target"))
+    tangent_name = _require_step_id(params, "tangent")
+    pick = params.get("pick")
 
-    point_name = point.get("name", "P")
-    conic_name = conic.get("name", "circ_O")
+    _add_point_if_coordinates(ctx, point_name, point_coordinates)
 
-    if index is not None:
-        tangent_name = f"tan_{point_name}_{index}"
-        ctx.collector.add(f"{tangent_name} = Tangent[{point_name}, {conic_name}, {index}]")
+    # GeoGebra 原生命令负责切线求解，这里只统一参数和命名。
+    if pick is None:
+        ctx.collector.add(f"{tangent_name} = Tangent[{point_name}, {target_name}]")
     else:
-        tangent_name = f"tan_{point_name}"
-        ctx.collector.add(f"{tangent_name} = Tangent[{point_name}, {conic_name}]")
-
-    ctx.collector.add(f"ShowLabel[{tangent_name}, false]")
+        index = _resolve_pick_index(params, fallback=1)
+        ctx.collector.add(f"{tangent_name} = Tangent[{point_name}, {target_name}, {index}]")
 
     execute_context(ctx)
-    stderr_print(f"[Tangent] 过点 {point_name} 作曲线 {conic_name} 的切线 {tangent_name}")
-    return None
+    stderr_print(f"[Tangent] 过点 {point_name} 作曲线 {target_name} 的切线 {tangent_name}")
 
 
 def handle_angle_bisector(
@@ -206,29 +209,28 @@ def handle_angle_bisector(
     params: dict,
     skip_coord_init: bool = False,
 ) -> None:
-    """绘制角平分线。"""
+    """绘制标准格式的角平分线。"""
     ctx = _build_context(page, skip_coord_init=skip_coord_init)
 
-    point1 = params.get("point1", {})
-    vertex = params.get("vertex", {})
-    point2 = params.get("point2", {})
+    points = params.get("points")
+    if not isinstance(points, (list, tuple)) or len(points) != 3:
+        raise Exception("angle_bisector 需要提供 points，且长度为 3")
 
-    p1_name = point1.get("name", "A")
-    vertex_name = vertex.get("name", "B")
-    p2_name = point2.get("name", "C")
+    p1_name, p1_coordinates = _resolve_point_ref(points[0])
+    vertex_name, vertex_coordinates = _resolve_point_ref(points[1])
+    p2_name, p2_coordinates = _resolve_point_ref(points[2])
 
-    _add_point_if_coordinates(ctx, p1_name, point1.get("coordinates", None))
-    _add_point_if_coordinates(ctx, vertex_name, vertex.get("coordinates", None))
-    _add_point_if_coordinates(ctx, p2_name, point2.get("coordinates", None))
+    _add_point_if_coordinates(ctx, p1_name, p1_coordinates)
+    _add_point_if_coordinates(ctx, vertex_name, vertex_coordinates)
+    _add_point_if_coordinates(ctx, p2_name, p2_coordinates)
 
-    bisector_name = f"bisector_{p1_name}{vertex_name}{p2_name}"
+    # 角平分线直接由 GeoGebra 的三点角平分命令生成。
+    bisector_name = _require_step_id(params, "angle_bisector")
     ctx.collector.add(
         f"{bisector_name} = AngleBisector[{p1_name}, {vertex_name}, {p2_name}]"
     )
-    ctx.collector.add(f"ShowLabel[{bisector_name}, false]")
 
     execute_context(ctx)
-    return None
 
 
 def handle_perpendicular_line(
@@ -237,22 +239,16 @@ def handle_perpendicular_line(
     params: dict,
     skip_coord_init: bool = False,
 ) -> None:
-    """绘制过点垂线。"""
+    """绘制标准格式的垂线。"""
     ctx = _build_context(page, skip_coord_init=skip_coord_init)
 
-    point = params.get("point", {})
-    line_param = params.get("line", {})
+    point_name, point_coordinates = _resolve_point_ref(params.get("through"))
+    target_name = _resolve_line_name(params.get("target"))
 
-    point_name = point.get("name", "P")
-    _add_point_if_coordinates(ctx, point_name, point.get("coordinates", None))
+    _add_point_if_coordinates(ctx, point_name, point_coordinates)
 
-    line_name = _resolve_line_name(ctx, line_param)
-
-    perpendicular_name = f"perp_{point_name}_{line_name}"
-    ctx.collector.add(
-        f"{perpendicular_name} = PerpendicularLine[{point_name}, {line_name}]"
-    )
-    ctx.collector.add(f"ShowLabel[{perpendicular_name}, false]")
+    # 保持旧实现：垂线直接由 GeoGebra 根据点与目标直线生成。
+    perpendicular_name = _require_step_id(params, "perpendicular_line")
+    ctx.collector.add(f"{perpendicular_name} = PerpendicularLine[{point_name}, {target_name}]")
 
     execute_context(ctx)
-    return None

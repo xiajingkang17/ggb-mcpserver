@@ -63,24 +63,27 @@ class CommandCollector:
                     if (typeof ggbApplet !== 'undefined' && ggbApplet.evalCommand) {{
                         {commands_js}
 
-                        // 【简化策略】只显示点的标签，隐藏所有其他对象的标签。
-                        // 点的命名规则：大写字母开头（A, B, C, A1, B1, C1, Point1等）。
-                        var allObjects = ggbApplet.getAllObjectNames();
+                        // 【统一标签策略】只显示点标签，隐藏非点对象标签。
+                        var allObjects = ggbApplet.getAllObjectNames?.();
                         if (allObjects) {{
-                            var objects = allObjects.split(',');
+                            var objects = Array.isArray(allObjects)
+                                ? allObjects
+                                : String(allObjects)
+                                    .split(',')
+                                    .map(name => name.trim())
+                                    .filter(Boolean);
+
                             for (var i = 0; i < objects.length; i++) {{
-                                var objName = objects[i].trim();
+                                var objName = String(objects[i] || '').trim();
                                 if (!objName) continue;
 
-                                // 判断是否是点（大写字母开头）。
-                                var isPoint = /^[A-Z]/.test(objName);
-
-                                // 只显示点的标签，隐藏其他所有对象。
-                                if (!isPoint) {{
-                                    try {{
-                                        ggbApplet.setLabelVisible(objName, false);
-                                    }} catch (e) {{}}
-                                }}
+                                try {{
+                                    var objectType = String(
+                                        ggbApplet.getObjectType?.(objName) || ''
+                                    ).toLowerCase();
+                                    var isPoint = objectType.indexOf('point') !== -1;
+                                    ggbApplet.setLabelVisible(objName, isPoint);
+                                }} catch (e) {{}}
                             }}
                         }}
 

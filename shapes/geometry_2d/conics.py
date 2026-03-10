@@ -1,15 +1,10 @@
 """
-2D 圆锥曲线基础 handler。
+2D 圆锥曲线与弧 handlers。
 
 本模块职责：
-1. 先迁移最简单的 2D 圆锥曲线图形。
-2. 保持现有命令生成方式不变，只把实现位置从旧大分支挪到 shapes 层。
-
-当前包含：
-- circle_center_radius
-- ellipse_equation
-- parabola_equation
-- hyperbola_equation
+1. 处理 circle / ellipse / parabola / hyperbola / arc 五类标准 2D 对象。
+2. 延续原实现的几何构造逻辑，不改变作图结果。
+3. 统一对象命名方式，使后续步骤可以直接通过 id 引用。
 """
 
 from __future__ import annotations
@@ -21,206 +16,242 @@ from shapes.common import execute_context
 
 
 # ========== 2D 圆锥曲线辅助逻辑 ==========
-def _resolve_2d_point_name(ctx, point_param, default_name: str) -> str:
-    """解析 2D 点参数，并在需要时创建点。"""
+def _resolve_named_point(point_param, param_name: str) -> tuple[str, object]:
+    """解析标准参数中的点引用。"""
+    if point_param is None:
+        raise Exception(f"{param_name} 需要提供点引用")
+
+    if isinstance(point_param, str):
+        return point_param, None
+
     if isinstance(point_param, dict):
-        point_name = point_param.get("name", default_name)
-        _add_point_if_coordinates(
-            ctx,
-            point_name,
-            point_param.get("coordinates", None),
-        )
-        return point_name
+        point_name = point_param.get("id")
+        if not point_name:
+            raise Exception(f"{param_name} 点对象必须提供 id")
+        point_coordinates = point_param.get("coords")
+        return point_name, point_coordinates
 
-    point_name = default_name
-    _add_point_if_coordinates(ctx, point_name, point_param)
-    return point_name
+    raise Exception(f"{param_name} 必须是字符串或包含 id 的对象")
 
 
-# ========== 2D 圆锥曲线 ==========
-def handle_circle_center_radius(
+def _require_step_id(params: dict, draw_type: str) -> str:
+    """获取当前标准步骤对应的对象名。"""
+    step_id = params.get("id")
+    if not isinstance(step_id, str) or not step_id.strip():
+        raise Exception(f"{draw_type} 需要提供明确的 id，不能依赖隐式命名")
+    return step_id.strip()
+
+
+def _resolve_focus_ids(params: dict, draw_type: str) -> tuple[str, str]:
+    """解析椭圆/双曲线显式提供的焦点 id。"""
+    focus_ids = params.get("focus_ids")
+    if not isinstance(focus_ids, (list, tuple)) or len(focus_ids) != 2:
+        raise Exception(f"{draw_type} 需要提供 focus_ids，且长度为 2")
+
+    focus1_name = focus_ids[0]
+    focus2_name = focus_ids[1]
+    if not isinstance(focus1_name, str) or not focus1_name.strip():
+        raise Exception(f"{draw_type}.focus_ids[0] 必须是非空字符串")
+    if not isinstance(focus2_name, str) or not focus2_name.strip():
+        raise Exception(f"{draw_type}.focus_ids[1] 必须是非空字符串")
+
+    return focus1_name.strip(), focus2_name.strip()
+
+
+# ========== 2D 圆锥曲线与弧 ==========
+def handle_circle(
     page,
     draw_type: str,
     params: dict,
     skip_coord_init: bool = False,
 ) -> None:
-    """绘制圆心半径形式的 2D 圆。"""
+    """绘制标准格式的圆。"""
     ctx = _build_context(page, skip_coord_init=skip_coord_init)
 
-    center = params.get("center", {})
-    center_name = center.get("name", "O")
-    center_coordinates = center.get("coordinates", None)
-    radius = params.get("radius", 1)
+    center_name, center_coordinates = _resolve_named_point(params.get("center"), "circle.center")
+    radius = params.get("radius")
+    if radius is None:
+        raise Exception("circle 需要提供 radius")
 
     _add_point_if_coordinates(ctx, center_name, center_coordinates)
 
-    circle_name = f"circ_{center_name}"
+    circle_name = _require_step_id(params, "circle")
     ctx.collector.add(f"{circle_name} = Circle[{center_name}, {radius}]")
-    ctx.collector.add(f"ShowLabel[{circle_name}, false]")
 
     execute_context(ctx)
-    return None
 
 
-def handle_ellipse_equation(
+def handle_ellipse(
     page,
     draw_type: str,
     params: dict,
     skip_coord_init: bool = False,
 ) -> None:
-    """绘制椭圆。"""
+    """绘制标准格式的椭圆。"""
     ctx = _build_context(page, skip_coord_init=skip_coord_init)
 
-    center_param = params.get("center", [0, 0])
-    a = params.get("a", 2)
-    b = params.get("b", 1)
+    center_name, center_coordinates = _resolve_named_point(
+        params.get("center"),
+        "ellipse.center",
+    )
+    a = params.get("a")
+    b = params.get("b")
+    if a is None or b is None:
+        raise Exception("ellipse 需要提供 a 和 b")
 
+    # 延续原实现：通过两焦点 + 半长轴长度构造 GeoGebra 椭圆。
     semimajor = max(a, b)
     focus_distance = math.sqrt(abs(a * a - b * b))
+    ellipse_name = _require_step_id(params, "ellipse")
+    focus1_name, focus2_name = _resolve_focus_ids(params, "ellipse")
 
-    if isinstance(center_param, dict):
-        center_name = center_param.get("name", "O_ellipse")
-        center_coordinates = center_param.get("coordinates", None)
-
-        if center_coordinates is not None:
-            cx, cy = center_coordinates[0], center_coordinates[1]
-            _add_point_if_coordinates(ctx, center_name, center_coordinates)
-            focus1_name = f"F1_{center_name}"
-            focus2_name = f"F2_{center_name}"
-            if a >= b:
-                ctx.collector.add(f"{focus1_name} = ({cx - focus_distance}, {cy})")
-                ctx.collector.add(f"{focus2_name} = ({cx + focus_distance}, {cy})")
-            else:
-                ctx.collector.add(f"{focus1_name} = ({cx}, {cy - focus_distance})")
-                ctx.collector.add(f"{focus2_name} = ({cx}, {cy + focus_distance})")
+    if center_coordinates is not None:
+        cx, cy = center_coordinates[0], center_coordinates[1]
+        _add_point_if_coordinates(ctx, center_name, center_coordinates)
+        if a >= b:
+            ctx.collector.add(f"{focus1_name} = ({cx - focus_distance}, {cy})")
+            ctx.collector.add(f"{focus2_name} = ({cx + focus_distance}, {cy})")
         else:
-            focus1_name = f"F1_{center_name}"
-            focus2_name = f"F2_{center_name}"
-            if a >= b:
-                ctx.collector.add(
-                    f"{focus1_name} = (x({center_name}) - {focus_distance}, y({center_name}))"
-                )
-                ctx.collector.add(
-                    f"{focus2_name} = (x({center_name}) + {focus_distance}, y({center_name}))"
-                )
-            else:
-                ctx.collector.add(
-                    f"{focus1_name} = (x({center_name}), y({center_name}) - {focus_distance})"
-                )
-                ctx.collector.add(
-                    f"{focus2_name} = (x({center_name}), y({center_name}) + {focus_distance})"
-                )
-
-        ellipse_name = f"ellipse_{center_name}"
-        ctx.collector.add(
-            f"{ellipse_name} = Ellipse[{focus1_name}, {focus2_name}, {semimajor}]"
-        )
-        ctx.collector.add(f"ShowLabel[{ellipse_name}, false]")
+            ctx.collector.add(f"{focus1_name} = ({cx}, {cy - focus_distance})")
+            ctx.collector.add(f"{focus2_name} = ({cx}, {cy + focus_distance})")
     else:
-        cx, cy = center_param[0], center_param[1]
         if a >= b:
             ctx.collector.add(
-                f"Ellipse[({cx - focus_distance}, {cy}), ({cx + focus_distance}, {cy}), {semimajor}]"
+                f"{focus1_name} = (x({center_name}) - {focus_distance}, y({center_name}))"
+            )
+            ctx.collector.add(
+                f"{focus2_name} = (x({center_name}) + {focus_distance}, y({center_name}))"
             )
         else:
             ctx.collector.add(
-                f"Ellipse[({cx}, {cy - focus_distance}), ({cx}, {cy + focus_distance}), {semimajor}]"
+                f"{focus1_name} = (x({center_name}), y({center_name}) - {focus_distance})"
+            )
+            ctx.collector.add(
+                f"{focus2_name} = (x({center_name}), y({center_name}) + {focus_distance})"
             )
 
+    ctx.collector.add(f"{ellipse_name} = Ellipse[{focus1_name}, {focus2_name}, {semimajor}]")
+
     execute_context(ctx)
-    return None
 
 
-def handle_parabola_equation(
+def handle_parabola(
     page,
     draw_type: str,
     params: dict,
     skip_coord_init: bool = False,
 ) -> None:
-    """绘制抛物线。"""
+    """绘制标准格式的抛物线。"""
     ctx = _build_context(page, skip_coord_init=skip_coord_init)
 
-    vertex_param = params.get("vertex", [0, 0])
-    focus_param = params.get("focus", [0, 1])
-
-    vertex_name = _resolve_2d_point_name(ctx, vertex_param, "V")
-    focus_name = _resolve_2d_point_name(ctx, focus_param, "F")
-
-    ctx.collector.add(
-        f"directrix_{focus_name} = PerpendicularLine[{vertex_name}, Line[{focus_name}, {vertex_name}]]"
+    vertex_name, vertex_coordinates = _resolve_named_point(
+        params.get("vertex"),
+        "parabola.vertex",
     )
-    parabola_name = f"parabola_{focus_name}"
-    ctx.collector.add(f"{parabola_name} = Parabola[{focus_name}, directrix_{focus_name}]")
-    ctx.collector.add(f"ShowLabel[{parabola_name}, false]")
+    focus_name, focus_coordinates = _resolve_named_point(
+        params.get("focus"),
+        "parabola.focus",
+    )
+
+    _add_point_if_coordinates(ctx, vertex_name, vertex_coordinates)
+    _add_point_if_coordinates(ctx, focus_name, focus_coordinates)
+
+    parabola_name = _require_step_id(params, "parabola")
+    directrix_name = f"dir_{parabola_name}"
+    # 保持旧实现的命令构造顺序：先做与轴垂直的准线，再生成抛物线。
+    ctx.collector.add(
+        f"{directrix_name} = PerpendicularLine[{vertex_name}, Line[{focus_name}, {vertex_name}]]"
+    )
+    ctx.collector.add(f"{parabola_name} = Parabola[{focus_name}, {directrix_name}]")
 
     execute_context(ctx)
-    return None
 
 
-def handle_hyperbola_equation(
+def handle_hyperbola(
     page,
     draw_type: str,
     params: dict,
     skip_coord_init: bool = False,
 ) -> None:
-    """绘制双曲线。"""
+    """绘制标准格式的双曲线。"""
     ctx = _build_context(page, skip_coord_init=skip_coord_init)
 
-    center_param = params.get("center", [0, 0])
-    a = params.get("a", 2)
-    b = params.get("b", 1)
+    center_name, center_coordinates = _resolve_named_point(
+        params.get("center"),
+        "hyperbola.center",
+    )
+    a = params.get("a")
+    b = params.get("b")
+    if a is None or b is None:
+        raise Exception("hyperbola 需要提供 a 和 b")
 
+    # 延续原实现：通过两焦点 + 实半轴长度构造 GeoGebra 双曲线。
     semimajor = max(a, b)
     focus_distance = math.sqrt(a * a + b * b)
+    hyperbola_name = _require_step_id(params, "hyperbola")
+    focus1_name, focus2_name = _resolve_focus_ids(params, "hyperbola")
 
-    if isinstance(center_param, dict):
-        center_name = center_param.get("name", "O_hyperbola")
-        center_coordinates = center_param.get("coordinates", None)
-
-        if center_coordinates is not None:
-            cx, cy = center_coordinates[0], center_coordinates[1]
-            _add_point_if_coordinates(ctx, center_name, center_coordinates)
-            focus1_name = f"F1_{center_name}"
-            focus2_name = f"F2_{center_name}"
-            if a >= b:
-                ctx.collector.add(f"{focus1_name} = ({cx - focus_distance}, {cy})")
-                ctx.collector.add(f"{focus2_name} = ({cx + focus_distance}, {cy})")
-            else:
-                ctx.collector.add(f"{focus1_name} = ({cx}, {cy - focus_distance})")
-                ctx.collector.add(f"{focus2_name} = ({cx}, {cy + focus_distance})")
+    if center_coordinates is not None:
+        cx, cy = center_coordinates[0], center_coordinates[1]
+        _add_point_if_coordinates(ctx, center_name, center_coordinates)
+        if a >= b:
+            ctx.collector.add(f"{focus1_name} = ({cx - focus_distance}, {cy})")
+            ctx.collector.add(f"{focus2_name} = ({cx + focus_distance}, {cy})")
         else:
-            focus1_name = f"F1_{center_name}"
-            focus2_name = f"F2_{center_name}"
-            if a >= b:
-                ctx.collector.add(
-                    f"{focus1_name} = (x({center_name}) - {focus_distance}, y({center_name}))"
-                )
-                ctx.collector.add(
-                    f"{focus2_name} = (x({center_name}) + {focus_distance}, y({center_name}))"
-                )
-            else:
-                ctx.collector.add(
-                    f"{focus1_name} = (x({center_name}), y({center_name}) - {focus_distance})"
-                )
-                ctx.collector.add(
-                    f"{focus2_name} = (x({center_name}), y({center_name}) + {focus_distance})"
-                )
-
-        hyperbola_name = f"hyperbola_{center_name}"
-        ctx.collector.add(
-            f"{hyperbola_name} = Hyperbola[{focus1_name}, {focus2_name}, {semimajor}]"
-        )
-        ctx.collector.add(f"ShowLabel[{hyperbola_name}, false]")
+            ctx.collector.add(f"{focus1_name} = ({cx}, {cy - focus_distance})")
+            ctx.collector.add(f"{focus2_name} = ({cx}, {cy + focus_distance})")
     else:
-        cx, cy = center_param[0], center_param[1]
         if a >= b:
             ctx.collector.add(
-                f"Hyperbola[({cx - focus_distance}, {cy}), ({cx + focus_distance}, {cy}), {semimajor}]"
+                f"{focus1_name} = (x({center_name}) - {focus_distance}, y({center_name}))"
+            )
+            ctx.collector.add(
+                f"{focus2_name} = (x({center_name}) + {focus_distance}, y({center_name}))"
             )
         else:
             ctx.collector.add(
-                f"Hyperbola[({cx}, {cy - focus_distance}), ({cx}, {cy + focus_distance}), {semimajor}]"
+                f"{focus1_name} = (x({center_name}), y({center_name}) - {focus_distance})"
+            )
+            ctx.collector.add(
+                f"{focus2_name} = (x({center_name}), y({center_name}) + {focus_distance})"
             )
 
+    ctx.collector.add(
+        f"{hyperbola_name} = Hyperbola[{focus1_name}, {focus2_name}, {semimajor}]"
+    )
+
     execute_context(ctx)
-    return None
+
+
+def handle_arc(
+    page,
+    draw_type: str,
+    params: dict,
+    skip_coord_init: bool = False,
+) -> None:
+    """绘制标准格式的圆弧。"""
+    ctx = _build_context(page, skip_coord_init=skip_coord_init)
+
+    kind = params.get("kind", "minor")
+    if kind not in {"minor", "major"}:
+        raise Exception(f"arc 暂只支持 kind=minor/major，当前为 {kind}")
+
+    center_name, center_coordinates = _resolve_named_point(params.get("center"), "arc.center")
+    start_name, start_coordinates = _resolve_named_point(params.get("start"), "arc.start")
+    end_name, end_coordinates = _resolve_named_point(params.get("end"), "arc.end")
+
+    _add_point_if_coordinates(ctx, center_name, center_coordinates)
+    _add_point_if_coordinates(ctx, start_name, start_coordinates)
+    _add_point_if_coordinates(ctx, end_name, end_coordinates)
+
+    arc_name = _require_step_id(params, "arc")
+
+    # 主路径统一使用 GeoGebra 的 CircularArc 命令。
+    # - kind=minor：按 start -> end 方向创建较短圆弧
+    # - kind=major：交换端点顺序，创建对应的另一段圆弧
+    if kind == "minor":
+        ctx.collector.add(f"{arc_name} = CircularArc[{center_name}, {start_name}, {end_name}]")
+    else:
+        ctx.collector.add(f"{arc_name} = CircularArc[{center_name}, {end_name}, {start_name}]")
+
+    execute_context(ctx)

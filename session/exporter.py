@@ -22,10 +22,25 @@ from typing import Any
 from .canvas import clear_current_page_with_retry, clear_other_active_pages
 from .html_build import build_interactive_html
 from .models import ExportHtmlRequest, ExportHtmlResult
-from .page_ops import wait_for_ggb_ready, wait_for_objects
+from .page_ops import apply_label_visibility_policy, wait_for_ggb_ready, wait_for_objects
 
 
 # ========== 页面刷新辅助函数 ==========
+def _resolve_output_dir(save_dir: str) -> Path:
+    """解析导出目录。
+
+    规则：
+    1. 绝对路径保持不变
+    2. 相对路径统一按仓库根目录解析，避免受进程工作目录影响
+    """
+    raw_path = Path(save_dir)
+    if raw_path.is_absolute():
+        return raw_path
+
+    repo_root = Path(__file__).resolve().parent.parent
+    return repo_root / raw_path
+
+
 def _refresh_page(page) -> None:
     """强制刷新当前 GeoGebra 构造。"""
     page.evaluate(
@@ -88,6 +103,7 @@ def export_interactive_html(
     try:
         steps = request.steps
         params = request.params or {}
+        object_id = request.id
         mode = request.mode
         is_sequence = steps is not None and len(steps) > 0
 
@@ -132,10 +148,16 @@ def export_interactive_html(
 
             for index, step in enumerate(steps):
                 step_type = step.get("type")
-                step_params = step.get("params", {})
+                step_params = dict(step.get("params", {}))
+                step_id = step.get("id")
 
                 if not step_type:
                     raise Exception(f"步骤 {index + 1} 缺少 type 参数")
+                if not step_id:
+                    raise Exception(f"步骤 {index + 1} 缺少 id 参数")
+
+                # 标准步骤格式要求由步骤 id 显式决定对象名。
+                step_params["id"] = step_id
 
                 draw_shape(
                     step_type,
@@ -151,6 +173,14 @@ def export_interactive_html(
             if mode == "auto":
                 mode = "3d" if is_3d_tool(first_type) else "2d"
         else:
+            if not object_id:
+                return ExportHtmlResult(
+                    success=False,
+                    message="错误：单个图形模式必须提供 id 参数",
+                )
+
+            params = dict(params)
+            params["id"] = object_id
             draw_shape(
                 request.draw_type,
                 params,
@@ -174,7 +204,11 @@ def export_interactive_html(
                     message="导出失败：构造尚未生成任何对象",
                 )
 
-        # 4) 导出当前构造为 Base64，再交由 html_build 模块生成交互页面。
+        # 4) 在所有对象真正生成后，统一通过 JS API 收口标签显示状态。
+        apply_label_visibility_policy(page)
+        _refresh_page(page)
+
+        # 5) 导出当前构造为 Base64，再交由 html_build 模块生成交互页面。
         ggb_b64 = page.evaluate(
             "() => (ggbApplet.getBase64 ? ggbApplet.getBase64() : null)"
         )
@@ -186,9 +220,9 @@ def export_interactive_html(
 
         html = build_interactive_html(ggb_b64, mode=mode)
 
-        # 5) 根据是否提供保存目录，决定写文件还是直接返回 HTML 内容。
+        # 6) 根据是否提供保存目录，决定写文件还是直接返回 HTML 内容。
         if request.save_dir:
-            out_dir = Path(request.save_dir)
+            out_dir = _resolve_output_dir(request.save_dir)
             out_dir.mkdir(parents=True, exist_ok=True)
 
             out_path = out_dir / f"ggb_interactive_{uuid.uuid4().hex[:8]}.html"
@@ -226,6 +260,7 @@ def export_interactive_html(
 # ========== 对外同步导出入口 ==========
 def export_interactive_html_sync(
     draw_type=None,
+    id=None,
     params=None,
     steps=None,
     mode: str = "auto",
@@ -243,6 +278,7 @@ def export_interactive_html_sync(
 
     Args:
         draw_type: 单个图形类型
+        id: 单个图形创建对象的唯一标识
         params: 单个图形参数
         steps: 连续绘制步骤列表
         mode: 导出模式，支持 auto / 2d / 3d
@@ -256,6 +292,7 @@ def export_interactive_html_sync(
     """
     request = ExportHtmlRequest(
         draw_type=draw_type,
+        id=id,
         params=params,
         steps=steps,
         mode=mode,

@@ -170,3 +170,37 @@ def wait_for_objects(page, min_count: int = 1, timeout_ms: int = 8000) -> int:
         }})
         """
     )
+
+
+def apply_label_visibility_policy(page) -> None:
+    """在对象生成完成后统一应用标签显示策略。"""
+    page.evaluate(
+        """
+        () => {
+            try {
+                const allNames = ggbApplet.getAllObjectNames?.();
+                const objects = Array.isArray(allNames)
+                    ? allNames
+                    : String(allNames || '')
+                        .split(',')
+                        .map(name => name.trim())
+                        .filter(Boolean);
+
+                for (const rawName of objects) {
+                    const objName = String(rawName || '').trim();
+                    if (!objName) continue;
+
+                    try {
+                        const objectType = String(
+                            ggbApplet.getObjectType?.(objName) || ''
+                        ).toLowerCase();
+                        const isPoint = objectType.indexOf('point') !== -1;
+                        ggbApplet.setLabelVisible(objName, isPoint);
+                    } catch (e) {}
+                }
+            } catch (e) {
+                console.error('标签策略应用失败:', e);
+            }
+        }
+        """
+    )
