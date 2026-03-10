@@ -1,0 +1,14 @@
+[project]
+name = "geo"
+version = "0.1.0"
+description = "GeoGebra MCP 服务器 - 为 LLM 提供几何图形绘制功能"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "httpx>=0.28.1",
+    "mcp>=1.17.0",
+    "playwright>=1.40.0",
+    "Pillow>=10.0.0",
+    "jpype1>=1.4.0",
+    "lxml>=4.9.0",
+]
