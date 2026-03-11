@@ -7,15 +7,7 @@ mcp>=1.17.0
 # 浏览器自动化
 playwright>=1.40.0
 
-# HTTP 客户端（可选，用于未来扩展）
-httpx>=0.28.1
-
-# 图像处理（可选，用于未来扩展）
-Pillow>=10.0.0
-
-# Java 接口（可选，用于未来扩展）
-jpype1>=1.4.0
-
-# XML 解析（可选，用于未来扩展）
-lxml>=4.9.0
+# Streamable HTTP 远程服务
+starlette>=0.37.2
+uvicorn>=0.30.0
 

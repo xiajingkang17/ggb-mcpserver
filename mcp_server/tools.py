@@ -1,110 +1,184 @@
 """
-MCP Tool 注册与调用分发。
-
-本模块职责：
-1. 统一构建 MCP tool 元信息。
-2. 统一处理 MCP tool 调用分发。
-3. 通过 registry 抽象隔离 server 层与底层绘图工具细节。
+MCP tool 定义与调用分发。
 """
 
+from __future__ import annotations
+
 import asyncio
-import json
-from typing import Any, Callable, Protocol, Sequence
+import re
+from typing import Any, Callable, Sequence
 
 from mcp.types import ImageContent, TextContent, Tool
 
-
-# ========== 类型约束 ==========
 ExportHtmlSync = Callable[..., tuple[bool, str, str]]
 ClearCanvas = Callable[[], str]
 
-
-class ToolSpecLike(Protocol):
-    """约束资源层依赖的工具规格边界。"""
-
-    name: str
-    category: str
-    params_schema: dict[str, Any]
-    description: str
-
-
-class ToolRegistryLike(Protocol):
-    """约束 server 层依赖的 registry 能力边界。"""
-
-    def build_export_input_schema(self) -> dict[str, Any]:
-        """返回 export_interactive_html 对应的输入 schema。"""
-
-    def list_tool_specs(self) -> list[ToolSpecLike]:
-        """返回全部工具规格。"""
-
-    def get(self, name: str) -> ToolSpecLike:
-        """返回指定工具规格。"""
+_COMMAND_ASSIGNMENT_RE = re.compile(
+    r"^\s*([A-Za-z_][A-Za-z0-9_]*)(?:\s*\([^)]*\))?\s*="
+)
+_FORBIDDEN_COMMAND_TOKENS = (
+    "deleteall",
+    "runscript",
+    "execute",
+)
 
 
-# ========== Tool 定义构建 ==========
-def _parse_step_string(raw_step: str, index: int) -> dict[str, Any]:
-    """Parse a JSON-encoded step object from string input."""
-    try:
-        parsed = json.loads(raw_step)
-    except json.JSONDecodeError as exc:
-        raise ValueError(
-            f"steps[{index}] 必须是 JSON 对象字符串：{exc.msg}"
-        ) from exc
+def _build_export_schema() -> dict[str, Any]:
+    """构建单轨导出工具的公开 schema。"""
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "mode": {
+                "type": "string",
+                "enum": ["2d", "3d"],
+                "description": "导出模式，只能是 2d 或 3d，必须显式指定。",
+            },
+            "save_dir": {
+                "type": "string",
+                "description": "可选的 HTML 保存目录。省略时默认保存到 pic，不直接返回 HTML 文本。",
+            },
+            "commands": {
+                "type": "array",
+                "description": (
+                    "GeoGebra 原生命令数组。每一项都必须是 {id, cmd}，"
+                    "其中 cmd 必须是单条带显式赋值的 GeoGebra 原生命令，"
+                    "且命令左侧对象名必须与 id 一致。"
+                ),
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "id": {
+                            "type": "string",
+                            "description": "对象名，必须与命令左侧对象名一致。",
+                        },
+                        "cmd": {
+                            "type": "string",
+                            "description": "单条带显式赋值的 GeoGebra 原生命令。",
+                        },
+                    },
+                    "required": ["id", "cmd"],
+                },
+            },
+        },
+        "required": ["mode", "commands"],
+    }
 
-    if not isinstance(parsed, dict):
-        raise ValueError(f"steps[{index}] 解析后必须是对象")
 
-    return parsed
+def _normalize_mode(mode: Any) -> str:
+    """规范化 mode。"""
+    if not isinstance(mode, str) or not mode.strip():
+        raise ValueError("mode 必须是非空字符串")
+
+    normalized = mode.strip().lower()
+    if normalized not in {"2d", "3d"}:
+        raise ValueError(f"mode 不支持：{mode}")
+    return normalized
 
 
-def _normalize_steps(steps: Any) -> list[dict[str, Any]] | None:
-    """Accept native step objects and JSON-string fallbacks from MCP bridges."""
-    if steps is None:
+def _normalize_save_dir(save_dir: Any) -> str | None:
+    """规范化 save_dir。"""
+    if save_dir is None:
         return None
+    if not isinstance(save_dir, str) or not save_dir.strip():
+        raise ValueError("save_dir 必须是非空字符串")
+    return save_dir.strip()
 
-    if isinstance(steps, str):
-        try:
-            steps = json.loads(steps)
-        except json.JSONDecodeError as exc:
+
+def _normalize_command_items(commands: Any) -> list[dict[str, str]]:
+    """校验并规范化 commands。"""
+    if not isinstance(commands, list):
+        raise ValueError("commands 必须是对象数组")
+    if not commands:
+        raise ValueError("commands 不能为空")
+
+    seen_ids: set[str] = set()
+    normalized: list[dict[str, str]] = []
+
+    for index, item in enumerate(commands):
+        if not isinstance(item, dict):
+            raise ValueError(f"commands[{index}] 必须是对象")
+
+        extra_keys = sorted(key for key in item if key not in {"id", "cmd"})
+        if extra_keys:
+            joined = ", ".join(extra_keys)
+            raise ValueError(f"commands[{index}] 存在不支持的字段：{joined}")
+
+        item_id = item.get("id")
+        command = item.get("cmd")
+
+        if not isinstance(item_id, str) or not item_id.strip():
+            raise ValueError(f"commands[{index}].id 必须是非空字符串")
+        if not isinstance(command, str) or not command.strip():
+            raise ValueError(f"commands[{index}].cmd 必须是非空字符串")
+
+        normalized_id = item_id.strip()
+        normalized_command = command.strip()
+
+        if "\n" in normalized_command or "\r" in normalized_command:
+            raise ValueError(f"commands[{index}].cmd 必须是单行命令")
+        if ";" in normalized_command:
+            raise ValueError(f"commands[{index}].cmd 不能包含多条命令")
+        if normalized_id in seen_ids:
+            raise ValueError(f"commands[{index}].id 重复：{normalized_id}")
+        seen_ids.add(normalized_id)
+
+        lowered = normalized_command.lower()
+        for token in _FORBIDDEN_COMMAND_TOKENS:
+            if token in lowered:
+                raise ValueError(
+                    f"commands[{index}].cmd 包含不允许的命令：{token}"
+                )
+
+        match = _COMMAND_ASSIGNMENT_RE.match(normalized_command)
+        if not match:
             raise ValueError(
-                f"steps 必须是数组，或可解析为数组的 JSON 字符串：{exc.msg}"
-            ) from exc
+                f"commands[{index}].cmd 必须是带显式赋值的单条命令"
+            )
 
-    if not isinstance(steps, list):
-        raise ValueError("steps 必须是对象数组，或 JSON 字符串数组")
+        lhs_name = match.group(1)
+        if lhs_name != normalized_id:
+            raise ValueError(
+                f"commands[{index}] 的 id 与命令左侧对象名不一致："
+                f"{normalized_id} != {lhs_name}"
+            )
 
-    normalized: list[dict[str, Any]] = []
-    for index, step in enumerate(steps):
-        if isinstance(step, dict):
-            normalized.append(step)
-            continue
-        if isinstance(step, str):
-            normalized.append(_parse_step_string(step, index))
-            continue
-        raise ValueError(f"steps[{index}] 必须是对象或 JSON 对象字符串")
+        normalized.append({"id": normalized_id, "cmd": normalized_command})
 
     return normalized
 
 
-def build_tool_definitions(tool_registry: ToolRegistryLike) -> list[Tool]:
-    """构建 MCP tool 定义。
+def _extract_export_payload(arguments: dict[str, Any]) -> dict[str, Any]:
+    """从公开 MCP 入参中提取导出 payload。"""
+    allowed_keys = {"mode", "save_dir", "commands"}
+    unexpected_keys = sorted(key for key in arguments if key not in allowed_keys)
+    if unexpected_keys:
+        joined = ", ".join(unexpected_keys)
+        raise ValueError(f"不支持的导出字段：{joined}")
 
-    说明：
-    当前 MCP 层仍然只暴露两个顶层工具：
-    1. clear_canvas_web
-    2. export_interactive_html
+    if "mode" not in arguments:
+        raise ValueError("export_interactive_html 必须显式提供 mode")
+    if "commands" not in arguments:
+        raise ValueError("export_interactive_html 必须提供 commands")
 
-    其中 export_interactive_html 的 draw_type / id / steps 枚举，
-    统一从 registry 层获取，不再由 server 层手工维护。
-    """
-    export_schema = tool_registry.build_export_input_schema()
+    return {
+        "mode": _normalize_mode(arguments.get("mode")),
+        "save_dir": _normalize_save_dir(arguments.get("save_dir")),
+        "commands": _normalize_command_items(arguments["commands"]),
+    }
 
+
+def build_tool_definitions() -> list[Tool]:
+    """构建对外公开的 MCP tools。"""
+    export_schema = _build_export_schema()
     return [
         Tool(
             name="clear_canvas_web",
-            description="清除GeoGebra画布，清空所有图形（可选使用，一般不需要）",
+            description="清除 GeoGebra 画布，清空所有图形。",
             inputSchema={
                 "type": "object",
+                "additionalProperties": False,
                 "properties": {},
                 "required": [],
             },
@@ -112,16 +186,15 @@ def build_tool_definitions(tool_registry: ToolRegistryLike) -> list[Tool]:
         Tool(
             name="export_interactive_html",
             description=(
-                "绘制并导出可交互的 GeoGebra HTML，"
-                "支持单个图形或连续绘制多个图形；"
-                "所有公共对象都必须提供显式 id。"
+                "使用 GeoGebra 原生命令 JSON 绘制并导出可交互 HTML。"
+                "公开入参直接为 {mode, save_dir, commands}。"
+                "commands 中每一项都必须提供 {id, cmd}。"
             ),
             inputSchema=export_schema,
         ),
     ]
 
 
-# ========== Tool 调用分发 ==========
 async def handle_tool_call(
     name: str,
     arguments: dict[str, Any],
@@ -129,13 +202,7 @@ async def handle_tool_call(
     clear_canvas: ClearCanvas,
     export_html_sync: ExportHtmlSync,
 ) -> Sequence[TextContent | ImageContent]:
-    """处理 MCP tool 调用。
-
-    这里不直接承载绘图逻辑，只负责：
-    1. 解析 MCP 入参
-    2. 调用对应业务函数
-    3. 组装 MCP 返回值
-    """
+    """处理 MCP tool 调用。"""
     if name == "clear_canvas_web":
         try:
             result = await asyncio.to_thread(clear_canvas)
@@ -144,34 +211,17 @@ async def handle_tool_call(
             return [TextContent(type="text", text=f"清除失败：{exc}")]
 
     if name == "export_interactive_html":
-        draw_type = arguments.get("draw_type")
-        object_id = arguments.get("id")
-        params = arguments.get("params", {})
-        mode = arguments.get("mode", "auto")
-        save_dir = arguments.get("save_dir")
-
         try:
-            steps = _normalize_steps(arguments.get("steps"))
-            success, message, html = await asyncio.to_thread(
+            payload = _extract_export_payload(arguments)
+            success, message, _output_path = await asyncio.to_thread(
                 export_html_sync,
-                draw_type=draw_type,
-                id=object_id,
-                params=params,
-                steps=steps,
-                mode=mode,
-                save_dir=save_dir,
+                commands=payload["commands"],
+                mode=payload["mode"],
+                save_dir=payload["save_dir"],
             )
 
-            if not success:
-                return [TextContent(type="text", text=message)]
-
-            response: list[TextContent | ImageContent] = [
-                TextContent(type="text", text=message)
-            ]
-            if html:
-                response.append(TextContent(type="text", text=f"HTML内容：\n\n{html}"))
-            return response
+            return [TextContent(type="text", text=message)]
         except Exception as exc:
-            return [TextContent(type="text", text=f"导出可交互HTML失败：{exc}")]
+            return [TextContent(type="text", text=f"导出命令 JSON HTML 失败：{exc}")]
 
     return [TextContent(type="text", text=f"未知工具：{name}")]

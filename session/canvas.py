@@ -122,7 +122,7 @@ def _quick_clear_page(page) -> None:
     )
 
 
-def _soft_clear_current_page(page) -> dict[str, Any]:
+def _soft_clear_current_page(page, *, mode: str) -> dict[str, Any]:
     """对当前导出页面执行增强型软清理。
 
     这套逻辑沿用主文件原来的策略：
@@ -134,14 +134,17 @@ def _soft_clear_current_page(page) -> dict[str, Any]:
 
     Args:
         page: 当前导出页面
+        mode: 当前导出模式，只能是 2d 或 3d
 
     Returns:
         包含 success / message / objectCount / needRetry 的结果字典
     """
     return page.evaluate(
         """
-        async () => {
+        async (mode) => {
             try {
+                const normalizedMode = String(mode || '').toLowerCase();
+
                 // 确保 GeoGebra 已加载。
                 if (typeof ggbApplet === 'undefined' || !ggbApplet.evalCommand) {
                     return { success: false, message: "GeoGebra未初始化", objectCount: -1, needRetry: false };
@@ -191,20 +194,30 @@ def _soft_clear_current_page(page) -> dict[str, Any]:
                     ggbApplet.updateConstruction();
                 }
 
-                // 重置坐标系、网格和坐标轴。
+                // 按当前模式重置视图状态，避免把 2D 命令误打到 3D 页面。
                 try {
-                    ggbApplet.evalCommand('ShowAxes(true)');
-                    ggbApplet.evalCommand('ShowGrid(true)');
-                    ggbApplet.evalCommand('SetCoordSystem(-10, 10, -10, 10)');
+                    if (normalizedMode === '2d') {
+                        ggbApplet.evalCommand('ShowAxes(true)');
+                        ggbApplet.evalCommand('ShowGrid(true)');
+                        ggbApplet.evalCommand('SetCoordSystem(-10, 10, -10, 10)');
+                    } else if (normalizedMode === '3d') {
+                        if (ggbApplet.setStandardView) {
+                            ggbApplet.setStandardView();
+                        }
+                        ggbApplet.evalCommand('SetCoordSystem(-5, 5, -5, 5, -5, 5)');
+                    }
                     ggbApplet.evalCommand('ZoomToFit()');
                 } catch (e) {
                     console.warn('坐标系重置失败:', e);
                 }
 
-                // 清掉页面级初始化标记，避免连续绘制受到旧状态影响。
-                if (typeof window.__ggb2d_initialized__ !== 'undefined') delete window.__ggb2d_initialized__;
-                if (typeof window.__ggb3d_initialized__ !== 'undefined') delete window.__ggb3d_initialized__;
-                if (typeof window.__ggbfunction_initialized__ !== 'undefined') delete window.__ggbfunction_initialized__;
+                // 仅清理当前模式对应的页面级初始化标记。
+                if (
+                    normalizedMode === '2d' &&
+                    typeof window.__ggb2d_initialized__ !== 'undefined'
+                ) {
+                    delete window.__ggb2d_initialized__;
+                }
 
                 await new Promise(r => setTimeout(r, 800));
                 await new Promise(r => setTimeout(r, 300));
@@ -237,23 +250,27 @@ def _soft_clear_current_page(page) -> dict[str, Any]:
                 };
             }
         }
-        """
+        """,
+        mode,
     )
 
 
-def _retry_soft_clear_current_page(page) -> dict[str, Any]:
+def _retry_soft_clear_current_page(page, *, mode: str) -> dict[str, Any]:
     """对当前页面执行第二次软清理重试。
 
     Args:
         page: 当前导出页面
+        mode: 当前导出模式，只能是 2d 或 3d
 
     Returns:
         包含 success / objectCount 的结果字典
     """
     return page.evaluate(
         """
-        async () => {
+        async (mode) => {
             try {
+                const normalizedMode = String(mode || '').toLowerCase();
+
                 if (typeof ggbApplet === 'undefined' || !ggbApplet.evalCommand) {
                     return { success: false, objectCount: -1 };
                 }
@@ -265,6 +282,20 @@ def _retry_soft_clear_current_page(page) -> dict[str, Any]:
                 if (ggbApplet.repaintView) {
                     ggbApplet.repaintView();
                 }
+
+                try {
+                    if (normalizedMode === '2d') {
+                        ggbApplet.evalCommand('ShowAxes(true)');
+                        ggbApplet.evalCommand('ShowGrid(true)');
+                        ggbApplet.evalCommand('SetCoordSystem(-10, 10, -10, 10)');
+                    } else if (normalizedMode === '3d') {
+                        if (ggbApplet.setStandardView) {
+                            ggbApplet.setStandardView();
+                        }
+                        ggbApplet.evalCommand('SetCoordSystem(-5, 5, -5, 5, -5, 5)');
+                    }
+                    ggbApplet.evalCommand('ZoomToFit()');
+                } catch (e) {}
 
                 await new Promise(r => setTimeout(r, 800));
                 await new Promise(r => setTimeout(r, 300));
@@ -285,7 +316,8 @@ def _retry_soft_clear_current_page(page) -> dict[str, Any]:
                 return { success: false, objectCount: -1 };
             }
         }
-        """
+        """,
+        mode,
     )
 
 
@@ -355,25 +387,26 @@ def clear_other_active_pages(
             print(f"[WARNING] 清除{page_name}实例时出错: {exc}")
 
 
-def clear_current_page_with_retry(page) -> dict[str, Any]:
+def clear_current_page_with_retry(page, *, mode: str) -> dict[str, Any]:
     """清理当前导出页面，并在必要时自动执行一次重试。
 
     这里保留主文件原来的清理策略和日志输出方式，确保导出行为尽量稳定。
 
     Args:
         page: 当前导出页面
+        mode: 当前导出模式，只能是 2d 或 3d
 
     Returns:
         最终清理结果字典
     """
-    clear_result = _soft_clear_current_page(page)
+    clear_result = _soft_clear_current_page(page, mode=mode)
 
     need_retry = clear_result.get("needRetry", False)
     remaining = clear_result.get("objectCount", -1)
 
     if need_retry and remaining > 0:
         print(f"[WARNING] 第一次清除后仍有 {remaining} 个对象，尝试第二次清除...")
-        retry_result = _retry_soft_clear_current_page(page)
+        retry_result = _retry_soft_clear_current_page(page, mode=mode)
         remaining = retry_result.get("objectCount", -1)
 
         if remaining == 0:

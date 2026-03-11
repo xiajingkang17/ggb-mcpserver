@@ -1,210 +1,326 @@
 # GeoGebra MCP Server
 
-面向大模型与 MCP 客户端的 GeoGebra 绘图服务，基于官方网页版本 GeoGebra 与 Playwright 构建，提供标准化的 2D / 3D / 函数绘图能力，可将构图结果导出为可交互 HTML，并通过 MCP resources 暴露规则、规范与常见题型 recipe。
+GeoGebra MCP Server 是一个面向 MCP 客户端和大模型的 GeoGebra 绘图服务。服务端通过 Playwright 驱动 GeoGebra Web applet，接收统一的 GeoGebra 原生命令 JSON，生成可交互 HTML 文件，并通过 MCP resources / prompt 暴露受控的命令知识。
+
+适用场景：
+
+- 几何题自动出图
+- 面向 LLM 的 GeoGebra MCP 工具接入
+- 需要把题目描述转成可交互几何图的工作流
 
 ## 核心功能
 
-- 标准化绘图协议 -- 统一使用 `type + id + params` 组织公共对象，支持单图形模式与多步骤模式
-- 2D 几何构造 -- 支持点、线段、直线、圆、椭圆、抛物线、双曲线、弧、交点、垂线、角平分线、切线等标准能力
-- 3D 基础绘图 -- 支持 3D 点、线段、对象上点、球、圆柱、圆锥
-- 函数图像绘制 -- 使用单一 `function` 类型，直接通过表达式 `expr` 生成函数图像，可配置滑动条
-- 可交互 HTML 导出 -- 将当前 GeoGebra 构图导出为可直接打开的交互式 HTML 文件
-- MCP 规则知识库 -- 提供 `overview / rules / spec / recipe` 资源，便于 LLM 先读协议再调用工具
-- Prompt 对齐 -- prompt 只定义行为约束，具体协议事实下沉到 resources
+`画布清理`
+清理 2D / 3D 画布，减少连续导出时的残留对象干扰。
+
+`交互导出`
+基于统一的 `{ mode, save_dir, commands }` 协议执行 GeoGebra 原生命令，导出可交互 HTML。
+
+`2D / 3D 页面复用`
+内部维护 2D 与 3D 两个浏览器页面槽位，避免每次导出都重新启动浏览器。
+
+`知识资源驱动`
+通过 `ggb://catalog/overview` 与一组 `ggb://rules/...` resources 暴露命令白名单、命名规则和构图约束。
+
+`统一 Prompt`
+提供 `unified_geometry` prompt，引导模型先读资源，再生成命令，最后调用导出工具。
+
+`stdio / Streamable HTTP 双入口`
+同时支持标准 stdio MCP 与 Streamable HTTP MCP。
 
 ## 技术栈
 
 | 类别 | 技术 |
 | --- | --- |
-| MCP 框架 | `mcp` |
-| 浏览器自动化 | `Playwright` |
-| 运行时 | Python `>=3.12` |
-| 几何前端 | GeoGebra 官方网页 |
-| HTML 导出 | 自定义 HTML 模板 + Base64 嵌入 |
-| 依赖管理 | `uv` / `pip` |
-
-## 项目结构
-
-```text
-geo/
-├── geogebra_web_api.py          # MCP 服务入口，装配 registry / session / server
-├── pyproject.toml               # 项目依赖与元数据
-├── requirements.txt             # pip 安装依赖
-├── README.md                    # 项目说明
-│
-├── drawing_tools/               # 标准绘图工具入口
-│   ├── tool_catalog.py          # function / 2D / 3D 工具目录
-│   ├── tool_2d.py               # 2D 调度入口
-│   ├── tool_3d.py               # 3D 调度入口
-│   ├── tool_function.py         # 函数调度入口
-│   └── __init__.py
-│
-├── registry/                    # 工具注册表与输入 schema
-│   ├── core.py                  # ToolRegistry 与 MCP 输入 schema 构建
-│   ├── models.py                # ToolSpec 等模型
-│   └── schemas/                 # function / 2D / 3D 精确 params_schema
-│       ├── common.py
-│       ├── function.py
-│       ├── two_d.py
-│       ├── three_d.py
-│       └── __init__.py
-│
-├── mcp_server/                  # MCP server 层
-│   ├── app.py                   # 注册 tools / prompts / resources / templates
-│   ├── tools.py                 # tool 定义与调用分发
-│   ├── prompts.py               # prompt 定义与读取
-│   ├── resources.py             # resources / templates 定义与读取
-│   ├── runner.py                # stdio MCP 运行入口
-│   └── __init__.py
-│
-├── session/                     # Playwright 与 HTML 导出编排
-│   ├── manager.py               # 2D / 3D 页面槽位管理
-│   ├── exporter.py              # 导出主流程
-│   ├── canvas.py                # 画布清理与实例回收
-│   ├── page_ops.py              # GeoGebra ready / object 等待
-│   ├── html_build.py            # 交互 HTML 构建
-│   ├── models.py                # 导出请求与结果模型
-│   └── __init__.py
-│
-├── shapes/                      # 具体绘图实现
-│   ├── common/                  # CommandCollector / ShapeContext
-│   ├── geometry_2d/             # 2D 标准 type handlers
-│   ├── geometry_3d/             # 3D 标准 type handlers
-│   ├── functions/               # 函数 handlers
-│   ├── scene/                   # 2D / 3D / function 场景初始化
-│   └── __init__.py
-│
-├── prompts/                     # MCP prompt 文本构建
-│   └── prompts_unified.py       # 统一行为规则 prompt
-│
-├── mcp_knowledge/               # MCP 知识内容
-│   ├── resources/               # rules 类 markdown
-│   └── recipes/                 # 常见题型 recipe markdown
-```
-
-## 架构分层
-
-项目采用分层结构，请求流如下：
-
-```text
-MCP Client
-   |
-   v
-MCP Server  -->  Registry  -->  Shapes
-   |               |            |
-   |               |            +--> GeoGebra 命令生成
-   |               |
-   |               +--> 标准 type / schema / category
-   |
-   +--> Session  --> Playwright Page  --> GeoGebra Web
-                      |
-                      +--> HTML Export
-```
-
-- `mcp_server` -- 注册 tools / prompts / resources / templates，对外提供 MCP 能力
-- `registry` -- 维护标准 `type`、handler 映射、精确 `params_schema`
-- `drawing_tools` -- 汇总标准工具目录与分类调度入口
-- `shapes` -- 按标准参数生成 GeoGebra 命令
-- `session` -- 管理浏览器页面、画布清理、对象等待和 HTML 导出
-
-## 标准能力集合
-
-### Function
-
-- `function`
-
-### 2D
-
-- `point`
-- `segment`
-- `line`
-- `circle`
-- `ellipse`
-- `parabola`
-- `hyperbola`
-- `arc`
-- `point_on`
-- `intersection`
-- `perpendicular_line`
-- `angle_bisector`
-- `tangent`
-
-### 3D
-
-- `point_3d`
-- `segment_3d`
-- `point_on_3d`
-- `sphere`
-- `cylinder`
-- `cone`
-
-## 核心协议规则
-
-- 所有公共对象都必须显式提供 `id`
-- 单图形模式必须提供：`draw_type + id + params`
-- 多步骤模式每一步必须提供：`type + id + params`
-- 后续引用对象时，只能引用对象 `id`
-- 不允许依赖隐式名字，例如 `line_AP`、`seg_BC`
-- 辅助对象使用稳定的派生命名，可按名称继续引用
-- 对象引用不再支持原始 GeoGebra 表达式兜底
-
-## MCP 能力概览
-
-### Tools
-
-| 名称 | 说明 |
-| --- | --- |
-| `export_interactive_html` | 绘制并导出可交互 GeoGebra HTML |
-| `clear_canvas_web` | 清空当前 GeoGebra 画布 |
-
-### Prompt
-
-| 名称 | 说明 |
-| --- | --- |
-| `unified_geometry` | 行为规则 prompt，要求先读取 resources 再调用工具 |
-
-### Resources
-
-#### 固定 resources
-
-- `ggb://catalog/overview`
-- `ggb://rules/naming`
-- `ggb://rules/references`
-- `ggb://rules/arcs`
-- `ggb://rules/intersection`
-
-#### 参数化 templates
-
-- `ggb://spec/type/{type}`
-- `ggb://recipe/topic/{topic}`
+| 语言 | Python 3.12+ |
+| MCP | `mcp>=1.17.0` |
+| 浏览器自动化 | `playwright>=1.40.0` |
+| HTTP 服务 | `starlette>=0.37.2`, `uvicorn>=0.30.0` |
+| 几何引擎 | GeoGebra Web 2D / 3D |
+| LLM 集成 | `langchain`, `langchain-openai`, `langchain-mcp-adapters`（可选） |
 
 ## 快速开始
 
-### 1. 安装依赖
+### 环境要求
 
-#### 使用 `uv`
+- Python >= 3.12
+- 已安装 Playwright Chromium
+- 运行时可访问 GeoGebra 静态资源
+
+### 安装依赖
+
+使用 `uv`：
 
 ```bash
 uv sync
 playwright install chromium
 ```
 
-#### 使用 `pip`
+使用 `pip`：
 
 ```bash
 pip install -r requirements.txt
 playwright install chromium
 ```
 
-### 2. 启动 MCP 服务
+如需运行 LangChain HTTP 示例，再额外安装：
+
+```bash
+pip install -r requirements-langchain.txt
+```
+
+### 启动服务
+
+stdio 模式：
 
 ```bash
 python geogebra_web_api.py
 ```
 
-默认通过 stdio 方式运行，供 MCP 客户端接入。
+HTTP 模式：
 
-### 3. MCP 客户端配置示例
+```bash
+python geogebra_web_api_http.py --host 127.0.0.1 --port 8000
+```
+
+默认 MCP endpoint：
+
+```text
+http://127.0.0.1:8000/mcp
+```
+
+## 常用命令
+
+| 命令 | 说明 |
+| --- | --- |
+| `python geogebra_web_api.py` | 启动 stdio MCP 服务 |
+| `python geogebra_web_api_http.py --host 127.0.0.1 --port 8000` | 启动 Streamable HTTP MCP 服务 |
+| `python langchain_http_demo.py --mcp-url http://127.0.0.1:8000/mcp` | 列出 LangChain 可见工具 |
+| `python -m py_compile mcp_server/tools.py` | 检查 MCP tool 层 |
+| `python -m py_compile mcp_server/resources.py` | 检查 resources 层 |
+| `python -m py_compile prompts/prompts_unified.py` | 检查 prompt 层 |
+| `python -m py_compile langchain_http_demo.py` | 检查 LangChain 示例 |
+
+## MCP 能力
+
+### Tools
+
+- `clear_canvas_web()`
+- `export_interactive_html({ mode, save_dir, commands })`
+
+### Resources
+
+- `ggb://catalog/overview`
+- `ggb://rules/ggb-commands`
+- `ggb://rules/ggb-commands-2d-basic`
+- `ggb://rules/ggb-commands-2d-conics`
+- `ggb://rules/ggb-commands-2d-relations`
+- `ggb://rules/ggb-commands-functions`
+- `ggb://rules/ggb-commands-sliders`
+- `ggb://rules/ggb-commands-3d`
+
+### Prompt
+
+- `unified_geometry`
+
+## 导出协议
+
+`export_interactive_html` 的公开入参固定为：
+
+```json
+{
+  "mode": "2d",
+  "save_dir": "pic",
+  "commands": [
+    { "id": "A", "cmd": "A=(0,0)" },
+    { "id": "B", "cmd": "B=(4,0)" },
+    { "id": "lineAB", "cmd": "lineAB=Line(A,B)" }
+  ]
+}
+```
+
+### 字段说明
+
+| 字段 | 说明 |
+| --- | --- |
+| `mode` | 必填，只能是 `2d` 或 `3d` |
+| `save_dir` | 可选，HTML 输出目录；省略时默认写到 `pic/` |
+| `commands` | 必填，GeoGebra 原生命令数组 |
+
+### 命令约束
+
+- 每条命令都必须是 `{ "id": "...", "cmd": "..." }`
+- `cmd` 必须是单条带显式赋值的 GeoGebra 原生命令
+- `id` 必须与命令左侧对象名完全一致
+- 单条 `cmd` 内不允许分号、换行或多条命令
+- 不允许 `DeleteAll`、`RunScript`、`Execute`
+
+正确示例：
+
+```json
+[
+  { "id": "A", "cmd": "A=(0,0)" },
+  { "id": "B", "cmd": "B=(4,0)" },
+  { "id": "lineAB", "cmd": "lineAB=Line(A,B)" }
+]
+```
+
+错误示例：
+
+```json
+[
+  { "id": "foo", "cmd": "lineAB=Line(A,B)" },
+  { "id": "lineAB", "cmd": "Line(A,B)" },
+  { "id": "bad", "cmd": "A=(0,0);B=(1,0)" }
+]
+```
+
+### 返回结果
+
+- 导出成功时返回输出文件路径
+- 服务端统一先落盘，不直接返回整份 HTML 文本
+- 省略 `save_dir` 时默认输出到 `pic/`
+
+## 推荐使用流程
+
+对接 LLM 时，推荐按以下顺序工作：
+
+1. 读取 `ggb://catalog/overview`
+2. 读取 `ggb://rules/ggb-commands`
+3. 按题型补读对应子资源
+4. 生成满足约束的 `{ mode, save_dir, commands }`
+5. 调用 `export_interactive_html`
+6. 使用返回的输出路径打开 HTML 文件
+
+## 项目结构
+
+```text
+.
+├── geogebra_runtime.py        # 运行时装配：session manager、tool handler、server
+├── geogebra_web_api.py        # stdio MCP 入口
+├── geogebra_web_api_http.py   # Streamable HTTP MCP 入口
+├── langchain_http_demo.py     # LangChain HTTP 集成示例
+├── mcp_server/
+│   ├── __init__.py            # Server 层统一导出
+│   ├── app.py                 # MCP server 注册：tools/resources/prompts
+│   ├── runner.py              # stdio 运行入口封装
+│   ├── http_runner.py         # Streamable HTTP ASGI / uvicorn 封装
+│   ├── tools.py               # tool schema、参数校验、调用分发
+│   ├── resources.py           # 固定 resources 注册与读取
+│   └── prompts.py             # MCP prompt 注册与读取
+├── prompts/
+│   └── prompts_unified.py     # 统一 prompt 文本
+├── session/
+│   ├── __init__.py            # Session 层统一导出
+│   ├── manager.py             # Playwright 2D / 3D 页面槽位管理
+│   ├── config.py              # 浏览器、超时、页面入口配置
+│   ├── canvas.py              # 画布清理、跨页面清理
+│   ├── page_ops.py            # 页面就绪判断、对象等待、标签策略
+│   ├── command_exec.py        # GeoGebra 原生命令批量执行
+│   ├── exporter.py            # 导出主流程：清屏、执行命令、生成 HTML
+│   ├── html_build.py          # 可交互 HTML 模板构建
+│   └── models.py              # Session 层数据模型
+├── mcp_knowledge/
+│   └── resources/
+│       ├── ggb_commands.md                 # 命令总索引
+│       ├── ggb_commands_2d_basic.md        # 2D 基础对象与路径动点
+│       ├── ggb_commands_2d_conics.md       # 圆锥曲线
+│       ├── ggb_commands_2d_relations.md    # 切线、垂线、角平分线
+│       ├── ggb_commands_functions.md       # 函数声明
+│       ├── ggb_commands_sliders.md         # 滑动条
+│       └── ggb_commands_3d.md              # 3D 基础对象与动点
+├── web/
+│   ├── ggb_2d_shell.html      # 本地 2D 最小 applet 壳页
+│   └── ggb_3d_shell.html      # 本地 3D 最小 applet 壳页
+├── pic/                       # 默认 HTML 导出目录
+├── pyproject.toml             # 项目元信息与依赖
+├── requirements.txt           # 基础依赖
+└── requirements-langchain.txt # LangChain 示例依赖
+```
+
+## 核心模块
+
+### Runtime
+
+`geogebra_runtime.py` 负责把 MCP server、resources、prompt、session manager 和导出处理器组装在一起，并通过锁保证单次导出串行执行。
+
+### Session
+
+`session/` 目录负责浏览器页面复用与 GeoGebra 实际执行：
+
+- `manager.py` 维护 2D / 3D 两个页面槽位
+- `config.py` 指向本地最小 GeoGebra 壳页，减少整站 UI 带来的启动开销
+- `canvas.py` 负责清理当前页面和其他活跃页面
+- `command_exec.py` 只执行原生命令，不做低层图元协议转换
+- `exporter.py` 串起清屏、执行命令、等待对象、导出 HTML 的完整流程
+- `html_build.py` 生成最终可交互 HTML
+
+### MCP Server
+
+`mcp_server/` 目录负责对外暴露 MCP 能力：
+
+- `tools.py` 负责公开 schema、参数校验和工具调度
+- `resources.py` 负责固定 `ggb://...` 资源注册与读取
+- `prompts.py` 负责 `unified_geometry` prompt 注册与读取
+- `runner.py` 与 `http_runner.py` 分别对应 stdio 与 HTTP 运行方式
+
+### Knowledge / Prompt
+
+- `mcp_knowledge/resources/` 提供命令白名单、命名规则与题型化资源
+- `prompts/prompts_unified.py` 约束模型先读资源，再出命令，最后调用工具
+
+## LangChain HTTP 示例
+
+先启动 HTTP MCP 服务：
+
+```bash
+python geogebra_web_api_http.py --host 127.0.0.1 --port 8000
+```
+
+列出工具：
+
+```bash
+python langchain_http_demo.py --mcp-url http://127.0.0.1:8000/mcp
+```
+
+直接调用工具：
+
+```powershell
+python langchain_http_demo.py `
+  --mcp-url http://127.0.0.1:8000/mcp `
+  --tool-name export_interactive_html `
+  --tool-args-json "{\"mode\":\"2d\",\"save_dir\":\"pic\",\"commands\":[{\"id\":\"A\",\"cmd\":\"A=(0,0)\"},{\"id\":\"B\",\"cmd\":\"B=(4,0)\"},{\"id\":\"lineAB\",\"cmd\":\"lineAB=Line(A,B)\"}]}"
+```
+
+使用自然语言驱动 agent：
+
+```powershell
+python langchain_http_demo.py `
+  --mcp-url http://127.0.0.1:8000/mcp `
+  --query "如图，在等腰△ABC中，AB=AC，⊙O为△ABC的外接圆，BC为底边。点P是劣弧BC上的一动点，连接AP交BC于D；过点C作AP的垂线，垂足为E，连接BE并延长交⊙O于F，连接PF、CF。已知AB=AC=5，BC=6。"
+```
+
+说明：
+
+- 示例 agent 可主动读取 MCP resources / prompt
+- 若模型未直接调用 `export_interactive_html`，但最终回复中给出了合法的导出 JSON，示例程序会自动补调一次导出
+
+## 环境变量
+
+`langchain_http_demo.py` 会从项目根目录的 `.env` 读取可选配置：
+
+```env
+KIMI_API_KEY=your_api_key
+KIMI_MODEL=kimi-k2-0905-preview
+KIMI_BASE_URL=https://api.moonshot.cn/v1
+KIMI_TEMPERATURE=0.2
+```
+
+兼容变量：
+
+- `MOONSHOT_API_KEY`
+
+## MCP 客户端配置示例
 
 ```json
 {
@@ -217,149 +333,39 @@ python geogebra_web_api.py
 }
 ```
 
-## 输入示例
+## 数据流
 
-### 单图形模式
-
-```json
-{
-  "draw_type": "function",
-  "id": "f",
-  "params": {
-    "expr": "x^2 - 3*x + 2"
-  },
-  "save_dir": "pic"
-}
+```text
+MCP Client / LLM
+  -> tools / resources / prompts
+  -> mcp_server/*
+  -> geogebra_runtime.py
+  -> session/*
+  -> GeoGebra Web applet
+  -> ggb base64
+  -> interactive HTML file
 ```
 
-### 多步骤模式
+## 校验
 
-```json
-{
-  "mode": "2d",
-  "save_dir": "pic",
-  "steps": [
-    {
-      "type": "point",
-      "id": "A",
-      "params": {
-        "coords": [0, 0]
-      }
-    },
-    {
-      "type": "point",
-      "id": "B",
-      "params": {
-        "coords": [4, 0]
-      }
-    },
-    {
-      "type": "line",
-      "id": "line_ab",
-      "params": {
-        "through": ["A", "B"]
-      }
-    }
-  ]
-}
-```
-
-### 交点示例
-
-```json
-{
-  "mode": "2d",
-  "save_dir": "pic",
-  "steps": [
-    {
-      "type": "point",
-      "id": "A",
-      "params": {
-        "coords": [0, 0]
-      }
-    },
-    {
-      "type": "point",
-      "id": "B",
-      "params": {
-        "coords": [4, 0]
-      }
-    },
-    {
-      "type": "point",
-      "id": "O",
-      "params": {
-        "coords": [2, 0]
-      }
-    },
-    {
-      "type": "line",
-      "id": "line_ab",
-      "params": {
-        "through": ["A", "B"]
-      }
-    },
-    {
-      "type": "circle",
-      "id": "circ_o",
-      "params": {
-        "center": "O",
-        "radius": 2
-      }
-    },
-    {
-      "type": "intersection",
-      "id": "P",
-      "params": {
-        "objects": ["line_ab", "circ_o"],
-        "pick": {
-          "mode": "index",
-          "value": 1
-        }
-      }
-    }
-  ]
-}
-```
-
-## LLM 调用建议
-
-- 先读 `ggb://catalog/overview`
-- 再读 `ggb://rules/naming` 和 `ggb://rules/references`
-- 涉及弧时读 `ggb://rules/arcs`
-- 涉及交点时读 `ggb://rules/intersection`
-- 不确定字段时读 `ggb://spec/type/{type}`
-- 遇到常见题型时读 `ggb://recipe/topic/{topic}`
-- 默认优先使用 `steps`
-- 交点、切线、垂足、对象上点优先使用原生几何关系能力，不优先手算坐标
-
-## 开发与验证
-
-### 语法检查
+建议在改动后至少运行：
 
 ```bash
+python -m py_compile geogebra_runtime.py
 python -m py_compile geogebra_web_api.py
+python -m py_compile geogebra_web_api_http.py
+python -m py_compile mcp_server/app.py
+python -m py_compile mcp_server/tools.py
+python -m py_compile mcp_server/resources.py
+python -m py_compile prompts/prompts_unified.py
+python -m py_compile session/exporter.py
+python -m py_compile langchain_http_demo.py
 ```
-
-### 协议一致性检查建议
-
-- 检查 `registry/core.py` 是否仍与 `drawing_tools/tool_catalog.py` 一致
-- 检查 `mcp_server/resources.py` 中的固定 resources 与 templates 是否可正常读取
-- 修改标准 type 后，同时更新：
-  - `drawing_tools/tool_catalog.py`
-  - `registry/schemas/`
-  - `mcp_server/resources.py`
-  - `prompts/prompts_unified.py`
 
 ## 注意事项
 
-- 运行时需要访问 GeoGebra 官方网页
 - 首次运行前需要安装 Playwright Chromium
-- `session/` 目录下的 HTML 文件属于运行产物，不属于协议本身
-- 当前没有完善的自动化回归测试，建议结合真实 MCP 调用进行验证
-
-## 致谢
-
-- [GeoGebra](https://www.geogebra.org/)
-- [Playwright](https://playwright.dev/)
-- [Model Context Protocol](https://modelcontextprotocol.io/)
+- 运行时仍需访问 GeoGebra 静态资源
+- HTTP 模式下 `save_dir` 写入的是服务端磁盘，不是客户端本地磁盘
+- 省略 `save_dir` 时默认输出到 `pic/`
+- 当前导出协议只接受 GeoGebra 原生命令 JSON

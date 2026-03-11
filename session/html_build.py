@@ -15,7 +15,7 @@ GeoGebra 可交互 HTML 构建器
 # ========== 可交互 HTML 构建 ==========
 def build_interactive_html(
     ggb_b64: str,
-    mode: str = "auto",
+    mode: str,
     title: str = "GeoGebra Interactive",
 ) -> str:
     """生成可交互的 GeoGebra HTML 页面。
@@ -28,7 +28,11 @@ def build_interactive_html(
     Returns:
         完整的 HTML 字符串
     """
-    app = "3d" if mode.lower() == "3d" else "geometry"
+    normalized_mode = str(mode).strip().lower()
+    if normalized_mode not in {"2d", "3d"}:
+        raise ValueError(f"mode 只能是 2d 或 3d，当前为: {mode}")
+
+    app = "3d" if normalized_mode == "3d" else "geometry"
 
     # 自定义工具栏：保留常用点、线、圆等工具；3D 下 GeoGebra 会自行补充旋转交互。
     toolbar = "0 1 2 | 3 4 5 | 10 11 | 15 45 46 | 70 72"
@@ -87,17 +91,12 @@ def build_interactive_html(
   }}
   function resetView(){{
     try {{
-      // 1. 清除所有对象
-      if (ggbApplet.evalCommand) {{
-        ggbApplet.evalCommand('DeleteAll()');
-      }}
-
-      // 2. 重置视图到标准位置
+      // 1. 重置视图到标准位置，但保留当前构造对象。
       if (ggbApplet.setStandardView) {{
         ggbApplet.setStandardView();
       }}
 
-      // 3. 重置坐标系和显示设置
+      // 2. 重置坐标系和显示设置。
       if (ggbApplet.evalCommand) {{
         ggbApplet.evalCommand('ShowAxes(true)');
         ggbApplet.evalCommand('ShowGrid(true)');
@@ -112,7 +111,7 @@ def build_interactive_html(
         ggbApplet.evalCommand('ZoomToFit()');
       }}
 
-      // 4. 刷新视图
+      // 3. 刷新视图。
       if (ggbApplet.repaintView) {{
         ggbApplet.repaintView();
       }}
