@@ -1,0 +1,6 @@
+# Optional dependencies for the LangChain HTTP integration demo.
+
+langchain
+langchain-openai
+langchain-mcp-adapters
+python-dotenv

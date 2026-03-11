@@ -15,12 +15,10 @@ GeoGebra 浏览器 Session 管理器
 from __future__ import annotations
 
 import time
-from collections.abc import Callable
 
 from playwright.sync_api import sync_playwright
 
 from .config import (
-    APP_BOOTSTRAP_SLEEP_SECONDS,
     APP_READY_MAX_RETRIES,
     APP_READY_RETRY_SLEEP_SECONDS,
     BODY_SELECTOR_TIMEOUT_MS,
@@ -69,44 +67,6 @@ class GeoGebraSessionManager:
                 url=geogebra_3d_url,
             ),
         }
-
-    def resolve_space_for_draw_type(
-        self,
-        draw_type: str,
-        *,
-        is_3d_tool: Callable[[str], bool],
-    ) -> SessionSpace:
-        """根据图形类型推断应使用的页面空间。
-
-        Args:
-            draw_type: 当前绘图类型
-            is_3d_tool: 外部注入的 3D 判断函数
-
-        Returns:
-            "2d" 或 "3d"
-        """
-        return "3d" if is_3d_tool(draw_type) else "2d"
-
-    def get_page_for_draw_type(
-        self,
-        draw_type: str,
-        *,
-        is_3d_tool: Callable[[str], bool],
-    ):
-        """根据图形类型获取可复用页面。
-
-        Args:
-            draw_type: 当前绘图类型
-            is_3d_tool: 外部注入的 3D 判断函数
-
-        Returns:
-            已就绪的 Playwright page 对象
-        """
-        space = self.resolve_space_for_draw_type(
-            draw_type,
-            is_3d_tool=is_3d_tool,
-        )
-        return self.get_page(space)
 
     def get_page(self, space: SessionSpace):
         """获取指定空间的页面实例，不存在时自动创建。
@@ -205,8 +165,6 @@ class GeoGebraSessionManager:
         page.wait_for_selector("body", timeout=BODY_SELECTOR_TIMEOUT_MS)
 
         # 官方网页版通常还需要额外等待 Applet 初始化完成。
-        time.sleep(APP_BOOTSTRAP_SLEEP_SECONDS)
-
         self._wait_until_ready(page, slot.instance_name)
 
         slot.browser = browser

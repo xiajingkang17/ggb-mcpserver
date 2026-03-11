@@ -41,6 +41,7 @@ async def run_server(
                 capabilities=ServerCapabilities(
                     tools={},
                     prompts={},
+                    resources={},
                 ),
             ),
         )

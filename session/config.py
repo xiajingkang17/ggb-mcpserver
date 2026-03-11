@@ -2,7 +2,7 @@
 GeoGebra 浏览器 Session 层配置
 
 本模块职责：
-1. 统一维护 GeoGebra 网页版地址
+1. 统一维护 GeoGebra 页面入口
 2. 统一维护 Playwright 浏览器启动参数
 3. 统一维护页面视口、超时、初始化等待等基础配置
 
@@ -12,9 +12,17 @@ GeoGebra 浏览器 Session 层配置
 - 让 manager / page_ops 模块只关注行为，不关注常量定义
 """
 
-# ========== GeoGebra 网页地址 ==========
-GEOGEBRA_2D_URL = "https://www.geogebra.org/classic?lang=zh_CN"
-GEOGEBRA_3D_URL = "https://www.geogebra.org/3d?lang=zh_CN"
+from pathlib import Path
+
+
+# ========== GeoGebra 页面入口 ==========
+# 这里不再直接加载 geogebra.org 的完整产品页，而是加载本地最小壳页。
+# 壳页只负责注入 GeoGebra applet，可明显减少站点级 UI 和脚本带来的冷启动开销。
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+WEB_SHELL_ROOT = PROJECT_ROOT / "web"
+
+GEOGEBRA_2D_URL = (WEB_SHELL_ROOT / "ggb_2d_shell.html").resolve().as_uri()
+GEOGEBRA_3D_URL = (WEB_SHELL_ROOT / "ggb_3d_shell.html").resolve().as_uri()
 
 
 # ========== 页面基础配置 ==========
@@ -29,12 +37,10 @@ BODY_SELECTOR_TIMEOUT_MS = 30000
 
 
 # ========== GeoGebra 初始化配置 ==========
-# 网页刚加载完成后，需要额外等待 GeoGebra Applet 初始化。
-APP_BOOTSTRAP_SLEEP_SECONDS = 8
-
-# 为了兼容 GeoGebra 官方页面初始化较慢的情况，保留多次重试机制。
-APP_READY_MAX_RETRIES = 8
-APP_READY_RETRY_SLEEP_SECONDS = 5
+# 页面 body 就绪后立即开始主动探测 GeoGebra Applet，不再固定 sleep。
+# 这里保留“总次数 + 探测间隔”的方式，兼顾冷启动速度和慢网场景。
+APP_READY_MAX_RETRIES = 20
+APP_READY_RETRY_SLEEP_SECONDS = 1
 
 
 # ========== Browser 启动参数 ==========

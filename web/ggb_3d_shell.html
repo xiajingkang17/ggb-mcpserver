@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GeoGebra 3D Shell</title>
+  <script src="https://www.geogebra.org/apps/deployggb.js"></script>
+  <style>
+    html, body {
+      margin: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #ffffff;
+    }
+
+    #applet_container {
+      width: 100vw;
+      height: 100vh;
+    }
+  </style>
+</head>
+<body>
+  <div id="applet_container"></div>
+  <script>
+    window.__ggb_shell_loaded__ = false;
+
+    const params = {
+      appName: "3d",
+      width: window.innerWidth,
+      height: window.innerHeight,
+      showToolBar: false,
+      showAlgebraInput: false,
+      showMenuBar: false,
+      showResetIcon: false,
+      showAnimationButton: false,
+      showSuggestionButtons: false,
+      enableShiftDragZoom: true,
+      enableRightClick: true,
+      useBrowserForJS: true,
+      language: "zh-CN",
+      appletOnLoad(api) {
+        window.ggbApplet = api;
+        window.__ggb_shell_loaded__ = true;
+      }
+    };
+
+    const applet = new GGBApplet(params, true);
+    window.addEventListener("load", () => {
+      applet.inject("applet_container");
+    });
+  </script>
+</body>
+</html>
