@@ -12,7 +12,7 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, ClassVar, Sequence
 
 from dotenv import load_dotenv
 from langchain.agents import create_agent
@@ -49,6 +49,145 @@ GEOMETRY_AGENT_SYSTEM_PROMPT = """你在调用一个 GeoGebra MCP。
 14. 切线、垂线等关系对象如果后续还要用到切点、垂足，必须再补一个点命令
 15. 如果任务要求导出 HTML，就必须真的调用工具，不要只输出文字分析
 """
+
+
+class MoonshotChatOpenAI(ChatOpenAI):
+    """Preserve Moonshot thinking fields across tool-calling turns."""
+
+    _REASONING_FIELD_NAMES: ClassVar[tuple[str, ...]] = (
+        "reasoning_content",
+        "reasoning_details",
+    )
+
+    @classmethod
+    def _extract_reasoning_fields(cls, source: Any) -> dict[str, Any]:
+        if source is None:
+            return {}
+
+        extracted: dict[str, Any] = {}
+        for field_name in cls._REASONING_FIELD_NAMES:
+            value: Any = None
+            if isinstance(source, dict):
+                value = source.get(field_name)
+            elif hasattr(source, field_name):
+                value = getattr(source, field_name)
+
+            if value is None:
+                continue
+            if isinstance(value, str) and not value.strip():
+                continue
+            extracted[field_name] = value
+
+        return extracted
+
+    @classmethod
+    def _extract_reasoning_from_content(cls, content: Any) -> dict[str, Any]:
+        if not isinstance(content, list):
+            return {}
+
+        reasoning_parts: list[str] = []
+        reasoning_details: list[dict[str, Any]] = []
+
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+
+            block_type = block.get("type")
+            if block_type in {"thinking", "reasoning_content"}:
+                text = (
+                    block.get("text")
+                    or block.get("thinking")
+                    or block.get("reasoning_content")
+                    or block.get("content")
+                )
+                if isinstance(text, str) and text.strip():
+                    reasoning_parts.append(text)
+                reasoning_details.append(dict(block))
+                continue
+
+            if block_type == "reasoning":
+                summary = block.get("summary")
+                if isinstance(summary, list):
+                    for item in summary:
+                        if not isinstance(item, dict):
+                            continue
+                        text = item.get("text")
+                        if isinstance(text, str) and text.strip():
+                            reasoning_parts.append(text)
+                reasoning_details.append(dict(block))
+
+        extracted: dict[str, Any] = {}
+        if reasoning_parts:
+            extracted["reasoning_content"] = "\n".join(reasoning_parts)
+        if reasoning_details:
+            extracted["reasoning_details"] = reasoning_details
+        return extracted
+
+    def _create_chat_result(
+        self,
+        response: Any,
+        generation_info: dict[str, Any] | None = None,
+    ) -> Any:
+        result = super()._create_chat_result(response, generation_info=generation_info)
+
+        response_choices: list[Any] = []
+        if isinstance(response, dict):
+            response_choices = response.get("choices") or []
+        else:
+            response_choices = list(getattr(response, "choices", []) or [])
+
+        for index, generation in enumerate(result.generations):
+            message = generation.message
+            if not isinstance(message, AIMessage):
+                continue
+
+            raw_message: Any = None
+            if index < len(response_choices):
+                choice = response_choices[index]
+                if isinstance(choice, dict):
+                    raw_message = choice.get("message")
+                else:
+                    raw_message = getattr(choice, "message", None)
+
+            reasoning_fields = self._extract_reasoning_fields(raw_message)
+            if reasoning_fields:
+                message.additional_kwargs.update(reasoning_fields)
+
+        return result
+
+    def _get_request_payload(
+        self,
+        input_: Any,
+        *,
+        stop: list[str] | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        payload = super()._get_request_payload(input_, stop=stop, **kwargs)
+
+        payload_messages = payload.get("messages")
+        if not isinstance(payload_messages, list):
+            return payload
+
+        input_messages = self._convert_input(input_).to_messages()
+        for original_message, payload_message in zip(
+            input_messages, payload_messages, strict=False
+        ):
+            if not isinstance(original_message, AIMessage):
+                continue
+            if not isinstance(payload_message, dict):
+                continue
+
+            reasoning_fields = self._extract_reasoning_fields(
+                original_message.additional_kwargs
+            )
+            if not reasoning_fields:
+                reasoning_fields = self._extract_reasoning_from_content(
+                    original_message.content
+                )
+            if reasoning_fields:
+                payload_message.update(reasoning_fields)
+
+        return payload
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
@@ -163,7 +302,7 @@ def _build_kimi_chat_model(args: argparse.Namespace) -> ChatOpenAI:
     if temperature is not None:
         kwargs["temperature"] = temperature
 
-    return ChatOpenAI(**kwargs)
+    return MoonshotChatOpenAI(**kwargs)
 
 
 def _parse_headers(raw_headers: list[str]) -> dict[str, str]:

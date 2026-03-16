@@ -22,75 +22,260 @@ if TYPE_CHECKING:
     from .manager import GeoGebraSessionManager
 
 
+_CLEAR_PAGE_SCRIPT = """
+async (options) => {
+    try {
+        const {
+            mode = '',
+            aggressive = false,
+            restoreView = false,
+            drop2dInitFlag = false,
+            waitMs = 500,
+            successMessage = '清除成功',
+            residualMessage = '清除后仍有残留',
+            invalidMessage = '无法验证清除结果',
+            alreadyEmptyMessage = '画布已清空',
+        } = options || {};
+
+        const normalizedMode = String(mode || '').toLowerCase();
+        const normalizedWaitMs = Number(waitMs);
+
+        // 确保 GeoGebra 已加载。
+        if (typeof ggbApplet === 'undefined' || !ggbApplet.evalCommand) {
+            return {
+                success: false,
+                message: 'GeoGebra未初始化',
+                objectCount: -1,
+                needRetry: false,
+                skipped: false,
+            };
+        }
+
+        // 统一处理 GeoGebra 官方 API 的对象列表返回值。
+        const normalizeObjectNames = (rawNames) => {
+            if (Array.isArray(rawNames)) {
+                return rawNames.map(name => String(name || '').trim()).filter(Boolean);
+            }
+            return String(rawNames || '')
+                .split(',')
+                .map(name => name.trim())
+                .filter(Boolean);
+        };
+
+        // 统一统计当前构造中的对象数量。
+        const countObjects = () => {
+            const rawNames = ggbApplet.getAllObjectNames?.();
+            return normalizeObjectNames(rawNames).length;
+        };
+
+        // 优先使用官方 newConstruction() 清空当前构造。
+        const clearConstruction = () => {
+            if (typeof ggbApplet.newConstruction === 'function') {
+                ggbApplet.newConstruction();
+            } else {
+                ggbApplet.evalCommand('DeleteAll()');
+            }
+        };
+
+        // 统一刷新视图，兼容不同页面上可用的 API。
+        const refreshConstructionView = () => {
+            if (typeof ggbApplet.refreshViews === 'function') {
+                ggbApplet.refreshViews();
+                return;
+            }
+            if (typeof ggbApplet.repaintView === 'function') {
+                ggbApplet.repaintView();
+            }
+            if (typeof ggbApplet.updateConstruction === 'function') {
+                ggbApplet.updateConstruction();
+            }
+        };
+
+        // 仅在 newConstruction() 后仍有残留时，才退化到逐个删除。
+        const deleteResidualObjects = () => {
+            const objectNames = normalizeObjectNames(ggbApplet.getAllObjectNames?.());
+            for (const objectName of objectNames) {
+                try {
+                    ggbApplet.deleteObject?.(objectName);
+                } catch (error) {}
+            }
+        };
+
+        // 导出页面需要恢复基础视图状态，避免旧页面状态影响后续绘制。
+        const restoreViewState = () => {
+            if (!restoreView) {
+                return;
+            }
+
+            try {
+                if (normalizedMode === '2d') {
+                    if (typeof ggbApplet.setAxesVisible === 'function') {
+                        ggbApplet.setAxesVisible(true, true);
+                    } else {
+                        ggbApplet.evalCommand('ShowAxes(true)');
+                    }
+
+                    if (typeof ggbApplet.setGridVisible === 'function') {
+                        ggbApplet.setGridVisible(true);
+                    } else {
+                        ggbApplet.evalCommand('ShowGrid(true)');
+                    }
+
+                    ggbApplet.evalCommand('SetCoordSystem(-10, 10, -10, 10)');
+                    ggbApplet.setAxesRatio?.(1, 1);
+                } else if (normalizedMode === '3d') {
+                    ggbApplet.setStandardView?.();
+                    ggbApplet.evalCommand('SetCoordSystem(-5, 5, -5, 5, -5, 5)');
+                }
+
+                ggbApplet.evalCommand('ZoomToFit()');
+            } catch (error) {
+                console.warn('坐标系重置失败:', error);
+            }
+        };
+
+        // 统一等待 GeoGebra 完成一次构造和视图刷新。
+        const sleep = async () => {
+            const effectiveWaitMs = Number.isFinite(normalizedWaitMs) && normalizedWaitMs >= 0
+                ? normalizedWaitMs
+                : 500;
+            await new Promise(resolve => setTimeout(resolve, effectiveWaitMs));
+        };
+
+        // 预检查：如果画布已经为空，则无需继续清理。
+        try {
+            if (countObjects() === 0) {
+                return {
+                    success: true,
+                    message: alreadyEmptyMessage,
+                    objectCount: 0,
+                    needRetry: false,
+                    skipped: true,
+                };
+            }
+        } catch (error) {
+            console.warn('预检查失败:', error);
+        }
+
+        clearConstruction();
+
+        if (aggressive) {
+            try {
+                if (countObjects() > 0) {
+                    deleteResidualObjects();
+                    clearConstruction();
+                }
+            } catch (error) {
+                console.warn('逐个删除失败:', error);
+            }
+        }
+
+        refreshConstructionView();
+        restoreViewState();
+
+        // 仅清理当前 2D 页面对应的初始化标记。
+        if (
+            drop2dInitFlag &&
+            normalizedMode === '2d' &&
+            typeof window.__ggb2d_initialized__ !== 'undefined'
+        ) {
+            delete window.__ggb2d_initialized__;
+        }
+
+        await sleep();
+
+        let objectCount = 0;
+        try {
+            objectCount = countObjects();
+        } catch (error) {
+            console.warn('无法获取对象数量:', error);
+            objectCount = -1;
+        }
+
+        return {
+            success: objectCount === 0,
+            message: objectCount === 0
+                ? successMessage
+                : objectCount < 0
+                    ? invalidMessage
+                    : residualMessage,
+            objectCount: objectCount,
+            needRetry: aggressive && objectCount > 0,
+            skipped: false,
+        };
+    } catch (error) {
+        return {
+            success: false,
+            message: error?.message || String(error),
+            objectCount: -1,
+            needRetry: false,
+            skipped: false,
+        };
+    }
+}
+"""
+
+
 # ========== 页面清理内部函数 ==========
+def _execute_clear(
+    page,
+    *,
+    mode: str = "",
+    aggressive: bool = False,
+    restore_view: bool = False,
+    drop_2d_init_flag: bool = False,
+    wait_ms: int = 500,
+    success_message: str = "清除成功",
+    residual_message: str = "清除后仍有残留",
+    invalid_message: str = "无法验证清除结果",
+    already_empty_message: str = "画布已清空",
+) -> dict[str, Any]:
+    """执行一次统一的页面清理动作。
+
+    设计目标：
+    1. 将 GeoGebra API 调用收敛到一个 JS 执行器
+    2. 将“是否激进清理 / 是否恢复视图 / 是否需要重试”参数化
+    3. 避免多处复制同一套对象计数、清空和校验逻辑
+
+    Args:
+        page: 目标 Playwright page 对象
+        mode: 当前页面模式，只能是 2d / 3d 或空字符串
+        aggressive: 是否在基础清理后追加一次逐对象删除兜底
+        restore_view: 是否在清理后恢复当前模式的基础视图状态
+        drop_2d_init_flag: 是否清理 2D 页面初始化标记
+        wait_ms: 清理后的等待时间
+        success_message: 成功时返回的消息
+        residual_message: 校验到残留对象时返回的消息
+        invalid_message: 无法完成校验时返回的消息
+        already_empty_message: 预检查发现画布为空时返回的消息
+
+    Returns:
+        包含 success / message / objectCount / needRetry 的结果字典
+    """
+    return page.evaluate(
+        _CLEAR_PAGE_SCRIPT,
+        {
+            "mode": mode,
+            "aggressive": aggressive,
+            "restoreView": restore_view,
+            "drop2dInitFlag": drop_2d_init_flag,
+            "waitMs": wait_ms,
+            "successMessage": success_message,
+            "residualMessage": residual_message,
+            "invalidMessage": invalid_message,
+            "alreadyEmptyMessage": already_empty_message,
+        },
+    )
+
+
 def _soft_clear_page(page) -> dict[str, Any]:
     """执行一次基础软清理。
 
     使用场景：
     - `clear_geogebra_canvas()` 汇总清理全部页面时
     - 只需要快速清空当前构造，不需要复杂重试时
-
-    Args:
-        page: Playwright page 对象
-
-    Returns:
-        包含 success / message / objectCount 的清理结果字典
     """
-    return page.evaluate(
-        """
-        async () => {
-            try {
-                if (typeof ggbApplet === 'undefined' || !ggbApplet.evalCommand) {
-                    return { success: false, message: "GeoGebra未初始化", objectCount: -1 };
-                }
-
-                // 预检查：如果当前没有对象，则直接返回。
-                let preCheckCount = 0;
-                try {
-                    const preObjects = ggbApplet.getAllObjectNames();
-                    preCheckCount = preObjects
-                        ? preObjects.split(',').filter(name => name.trim()).length
-                        : 0;
-                    if (preCheckCount === 0) {
-                        return { success: true, message: "画布已清空", objectCount: 0 };
-                    }
-                } catch (e) {
-                    console.warn('预检查失败:', e);
-                }
-
-                // 执行基础清理。
-                ggbApplet.evalCommand('DeleteAll()');
-                if (typeof ggbApplet.reset === 'function') {
-                    ggbApplet.reset();
-                }
-                if (ggbApplet.repaintView) {
-                    ggbApplet.repaintView();
-                }
-
-                // 等待渲染后再验证结果。
-                await new Promise(r => setTimeout(r, 500));
-
-                let objectCount = 0;
-                try {
-                    const allObjects = ggbApplet.getAllObjectNames();
-                    objectCount = allObjects
-                        ? allObjects.split(',').filter(name => name.trim()).length
-                        : 0;
-                } catch (e) {
-                    objectCount = -1;
-                }
-
-                return {
-                    success: objectCount === 0,
-                    message: objectCount === 0 ? "清除成功" : "清除后仍有残留",
-                    objectCount: objectCount
-                };
-            } catch (e) {
-                return { success: false, message: e.message, objectCount: -1 };
-            }
-        }
-        """
-    )
+    return _execute_clear(page, wait_ms=500)
 
 
 def _quick_clear_page(page) -> None:
@@ -99,38 +284,18 @@ def _quick_clear_page(page) -> None:
     使用场景：
     - 当前页面准备导出时，需要先清理其他 2D / 3D 活跃实例
     - 这里不追求完整诊断，只需要尽量减少旧构造干扰
-
-    Args:
-        page: 目标 Playwright page 对象
     """
-    page.evaluate(
-        """
-        async () => {
-            try {
-                if (typeof ggbApplet !== 'undefined' && ggbApplet.evalCommand) {
-                    ggbApplet.evalCommand('DeleteAll()');
-                    if (typeof ggbApplet.reset === 'function') {
-                        ggbApplet.reset();
-                    }
-                    await new Promise(r => setTimeout(r, 200));
-                }
-            } catch (e) {
-                console.warn('清除其他实例失败:', e);
-            }
-        }
-        """
-    )
+    _execute_clear(page, wait_ms=200)
 
 
 def _soft_clear_current_page(page, *, mode: str) -> dict[str, Any]:
     """对当前导出页面执行增强型软清理。
 
-    这套逻辑沿用主文件原来的策略：
-    1. DeleteAll
-    2. 尝试逐个删除残留对象
-    3. reset + repaint + updateConstruction
-    4. 重置坐标系与显示状态
-    5. 验证对象数，并决定是否需要重试
+    核心步骤：
+    1. 优先使用 newConstruction 清空当前构造
+    2. 仅在必要时退化到逐个删除残留对象
+    3. 恢复当前模式的基础视图状态
+    4. 验证对象数，并决定是否需要重试
 
     Args:
         page: 当前导出页面
@@ -139,185 +304,37 @@ def _soft_clear_current_page(page, *, mode: str) -> dict[str, Any]:
     Returns:
         包含 success / message / objectCount / needRetry 的结果字典
     """
-    return page.evaluate(
-        """
-        async (mode) => {
-            try {
-                const normalizedMode = String(mode || '').toLowerCase();
-
-                // 确保 GeoGebra 已加载。
-                if (typeof ggbApplet === 'undefined' || !ggbApplet.evalCommand) {
-                    return { success: false, message: "GeoGebra未初始化", objectCount: -1, needRetry: false };
-                }
-
-                // 预检查：如果画布已经为空，则无需继续清理。
-                let preCheckCount = 0;
-                try {
-                    const preObjects = ggbApplet.getAllObjectNames();
-                    preCheckCount = preObjects
-                        ? preObjects.split(',').filter(name => name.trim()).length
-                        : 0;
-                    if (preCheckCount === 0) {
-                        console.log("[SUCCESS] 画布已清空，跳过清理");
-                        return { success: true, message: "画布已清空", objectCount: 0, needRetry: false };
-                    }
-                } catch (e) {
-                    console.warn('预检查失败:', e);
-                }
-
-                // 第一次软清理：优先清掉全部对象，再补一轮逐个删除。
-                ggbApplet.evalCommand('DeleteAll()');
-
-                try {
-                    const allObjNames = ggbApplet.getAllObjectNames();
-                    if (allObjNames) {
-                        const objArray = allObjNames.split(',').filter(name => name.trim());
-                        for (let i = 0; i < objArray.length; i++) {
-                            try {
-                                ggbApplet.deleteObject(objArray[i]);
-                            } catch (e) {}
-                        }
-                    }
-                } catch (e) {
-                    console.warn('逐个删除失败:', e);
-                }
-
-                ggbApplet.evalCommand('DeleteAll()');
-
-                if (typeof ggbApplet.reset === 'function') {
-                    ggbApplet.reset();
-                }
-                if (ggbApplet.repaintView) {
-                    ggbApplet.repaintView();
-                }
-                if (ggbApplet.updateConstruction) {
-                    ggbApplet.updateConstruction();
-                }
-
-                // 按当前模式重置视图状态，避免把 2D 命令误打到 3D 页面。
-                try {
-                    if (normalizedMode === '2d') {
-                        ggbApplet.evalCommand('ShowAxes(true)');
-                        ggbApplet.evalCommand('ShowGrid(true)');
-                        ggbApplet.evalCommand('SetCoordSystem(-10, 10, -10, 10)');
-                    } else if (normalizedMode === '3d') {
-                        if (ggbApplet.setStandardView) {
-                            ggbApplet.setStandardView();
-                        }
-                        ggbApplet.evalCommand('SetCoordSystem(-5, 5, -5, 5, -5, 5)');
-                    }
-                    ggbApplet.evalCommand('ZoomToFit()');
-                } catch (e) {
-                    console.warn('坐标系重置失败:', e);
-                }
-
-                // 仅清理当前模式对应的页面级初始化标记。
-                if (
-                    normalizedMode === '2d' &&
-                    typeof window.__ggb2d_initialized__ !== 'undefined'
-                ) {
-                    delete window.__ggb2d_initialized__;
-                }
-
-                await new Promise(r => setTimeout(r, 800));
-                await new Promise(r => setTimeout(r, 300));
-
-                let objectCount = 0;
-                try {
-                    const allObjects = ggbApplet.getAllObjectNames();
-                    objectCount = allObjects
-                        ? allObjects.split(',').filter(name => name.trim()).length
-                        : 0;
-                } catch (e) {
-                    console.warn('无法获取对象数量:', e);
-                    objectCount = -1;
-                }
-
-                console.log(`✅ 第一次软清理完成，剩余对象数：${objectCount}`);
-                return {
-                    success: objectCount === 0,
-                    message: objectCount === 0 ? "软清理成功" : "软清理后仍有残留",
-                    objectCount: objectCount,
-                    needRetry: objectCount > 0
-                };
-            } catch (e) {
-                console.error("软清理异常:", e);
-                return {
-                    success: false,
-                    message: e.message,
-                    objectCount: -1,
-                    needRetry: true
-                };
-            }
-        }
-        """,
-        mode,
+    return _execute_clear(
+        page,
+        mode=mode,
+        aggressive=True,
+        restore_view=True,
+        drop_2d_init_flag=True,
+        wait_ms=1100,
+        success_message="软清理成功",
+        residual_message="软清理后仍有残留",
+        invalid_message="无法验证软清理结果",
+        already_empty_message="画布已清空",
     )
 
 
 def _retry_soft_clear_current_page(page, *, mode: str) -> dict[str, Any]:
     """对当前页面执行第二次软清理重试。
 
-    Args:
-        page: 当前导出页面
-        mode: 当前导出模式，只能是 2d 或 3d
-
-    Returns:
-        包含 success / objectCount 的结果字典
+    使用场景：
+    - 第一次导出前软清理仍检测到残留对象时
+    - 在不刷新页面的前提下，再执行一次保守的清理校验
     """
-    return page.evaluate(
-        """
-        async (mode) => {
-            try {
-                const normalizedMode = String(mode || '').toLowerCase();
-
-                if (typeof ggbApplet === 'undefined' || !ggbApplet.evalCommand) {
-                    return { success: false, objectCount: -1 };
-                }
-
-                ggbApplet.evalCommand('DeleteAll()');
-                if (typeof ggbApplet.reset === 'function') {
-                    ggbApplet.reset();
-                }
-                if (ggbApplet.repaintView) {
-                    ggbApplet.repaintView();
-                }
-
-                try {
-                    if (normalizedMode === '2d') {
-                        ggbApplet.evalCommand('ShowAxes(true)');
-                        ggbApplet.evalCommand('ShowGrid(true)');
-                        ggbApplet.evalCommand('SetCoordSystem(-10, 10, -10, 10)');
-                    } else if (normalizedMode === '3d') {
-                        if (ggbApplet.setStandardView) {
-                            ggbApplet.setStandardView();
-                        }
-                        ggbApplet.evalCommand('SetCoordSystem(-5, 5, -5, 5, -5, 5)');
-                    }
-                    ggbApplet.evalCommand('ZoomToFit()');
-                } catch (e) {}
-
-                await new Promise(r => setTimeout(r, 800));
-                await new Promise(r => setTimeout(r, 300));
-
-                let objectCount = 0;
-                try {
-                    const allObjects = ggbApplet.getAllObjectNames();
-                    objectCount = allObjects
-                        ? allObjects.split(',').filter(name => name.trim()).length
-                        : 0;
-                } catch (e) {
-                    objectCount = -1;
-                }
-
-                console.log(`✅ 第二次软清理完成，剩余对象数：${objectCount}`);
-                return { success: objectCount === 0, objectCount: objectCount };
-            } catch (e) {
-                return { success: false, objectCount: -1 };
-            }
-        }
-        """,
-        mode,
+    return _execute_clear(
+        page,
+        mode=mode,
+        restore_view=True,
+        drop_2d_init_flag=True,
+        wait_ms=1100,
+        success_message="第二次软清理成功",
+        residual_message="第二次软清理后仍有残留",
+        invalid_message="无法验证第二次软清理结果",
+        already_empty_message="画布已清空",
     )
 
 
@@ -403,6 +420,7 @@ def clear_current_page_with_retry(page, *, mode: str) -> dict[str, Any]:
 
     need_retry = clear_result.get("needRetry", False)
     remaining = clear_result.get("objectCount", -1)
+    skipped = clear_result.get("skipped", False)
 
     if need_retry and remaining > 0:
         print(f"[WARNING] 第一次清除后仍有 {remaining} 个对象，尝试第二次清除...")
@@ -425,6 +443,8 @@ def clear_current_page_with_retry(page, *, mode: str) -> dict[str, Any]:
 
     if not clear_result.get("success", False):
         print(f"[WARNING] 清除画布警告：{clear_result.get('message', '未知错误')}")
+    elif skipped:
+        print("[SUCCESS] 画布本来为空，跳过清理")
     elif remaining == 0:
         print("[SUCCESS] 画布已完全清除（第一次清除成功）")
     else:
