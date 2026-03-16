@@ -5,3 +5,5 @@ __pycache__/
 
 ggb_interactive_*.html
 pic/
+.tmp/
+

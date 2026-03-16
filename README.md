@@ -297,7 +297,9 @@ python langchain_http_demo.py `
 ```powershell
 python langchain_http_demo.py `
   --mcp-url http://127.0.0.1:8000/mcp `
-  --query "如图，在等腰△ABC中，AB=AC，⊙O为△ABC的外接圆，BC为底边。点P是劣弧BC上的一动点，连接AP交BC于D；过点C作AP的垂线，垂足为E，连接BE并延长交⊙O于F，连接PF、CF。已知AB=AC=5，BC=6。"
+  --query "如图，在四棱锥 P−ABCD 中，底面 ABCD 是直角梯形，AB∥CD，∠DAB=90∘，PD⊥ 底面 ABCD。
+已知：PD=AD=2，AB=2CD=2。
+点 M 是侧棱 PB 上的动点（不与 P,B 重合），设 PBPM​=λ。你必须调用mcptool把这个图通过html格式画出并导出来"
 ```
 
 说明：
